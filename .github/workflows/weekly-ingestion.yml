@@ -1,0 +1,50 @@
+name: weekly-ingestion
+
+# Runs every Wednesday around 1-2am Sydney to catch the StockUp catalogue post.
+# Cron is in UTC. 16:00 UTC Tuesday ≈ 2am AEST Wed / 3am AEDT Wed — safely after
+# the catalogue is up. Manual trigger also exposed for ad-hoc re-runs.
+on:
+  schedule:
+    - cron: "0 16 * * 2"  # 16:00 UTC Tuesday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    name: Scrape weekly catalogue + write artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ingestion pipeline
+        id: pipeline
+        run: |
+          mkdir -p data/runs
+          python -m src.pipeline --write-json data/runs --verbose
+
+      - name: Upload run artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ingestion-${{ github.run_id }}
+          path: data/runs/*.json
+          retention-days: 30
+
+      # Once Supabase project exists, uncomment and add secrets:
+      # - name: Write to Supabase
+      #   env:
+      #     SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      #     SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      #   run: python -m src.pipeline --write-db
