@@ -1,23 +1,33 @@
 """CLI orchestrator for the weekly ingestion pipeline.
 
-For now: runs the StockUp OzBargain scraper, writes results to JSON, prints
-a summary. Once a Supabase project exists, --write-db will map records to
-the products / price_observations / specials / scrape_runs tables.
+Runs both StockUp scrapers (post + Google Sheet), then optionally
+writes the results to JSON, to Supabase, or both. Supabase write
+maps records onto products / price_observations / specials /
+scrape_runs — see src/db/writer.py.
+
+Cross-source order matters: when --write-db is set, we write the
+**sheet first, post second**, so post rows overwrite sheet rows on
+(retailer, retailer_sku) collisions. That preserves the post's
+richer per-row cycle metadata (the post has populated
+'last_halfprice_weeks_ago'; the sheet is sparser on cycle data).
 
 Examples:
-    python -m src.pipeline                            # scrape, log to console, no writes
-    python -m src.pipeline --write-json out/          # scrape and dump to out/<timestamp>.json
-    python -m src.pipeline --verbose                  # debug logging
+    python -m src.pipeline                            # both scrapes, log to console
+    python -m src.pipeline --write-json out/          # both scrapes + JSON dumps
+    python -m src.pipeline --write-db                 # both scrapes + DB writes
+    python -m src.pipeline --write-db --verbose       # DEBUG logging
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.scrapers import ozbargain_stockup
+from src.models import ScrapeOutput
+from src.scrapers import ozbargain_stockup, stockup_sheet
 from src.scrapers.base import build_session, configure_logging
 
 
@@ -29,13 +39,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--write-json",
         metavar="DIR",
-        help="Directory to write a JSON dump of the scrape (created if missing).",
+        help="Directory to write JSON dumps of each scrape (created if missing).",
     )
     parser.add_argument(
         "--write-db",
         action="store_true",
-        help="Write to Supabase (requires SUPABASE_URL + SUPABASE_SERVICE_KEY env vars). "
-             "Not yet implemented — waiting on Supabase project creation.",
+        help="Write to Supabase via SUPABASE_DB_URL (Session Pooler URI). "
+             "Loads .env from the project root if present.",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -48,35 +58,98 @@ def main(argv: list[str] | None = None) -> int:
     log.info("pipeline.start", extra={"verbose": args.verbose})
 
     session = build_session()
-    output = ozbargain_stockup.scrape(session, log)
 
-    # Summary line — easy to eyeball in CI logs.
-    summary = {
-        "status": output.run.status,
-        "source": output.run.source,
-        "items": output.run.items_found,
-        "duration_ms": output.run.duration_ms,
-        "week_start": output.specials[0].week_start.isoformat() if output.specials else None,
-        "url": output.run.source_url,
-    }
-    log.info("pipeline.result %s", json.dumps(summary))
+    # Run both scrapers. Each is independent — failures in one don't
+    # block the other.
+    post_output = ozbargain_stockup.scrape(session, log)
+    sheet_output = stockup_sheet.scrape(session, log)
+
+    log.info(
+        "pipeline.result post_status=%s post_items=%d sheet_status=%s sheet_items=%d",
+        post_output.run.status,
+        post_output.run.items_found,
+        sheet_output.run.status,
+        sheet_output.run.items_found,
+    )
 
     if args.write_db:
-        log.warning("--write-db requested but Supabase target not configured yet; skipping.")
+        _maybe_load_dotenv()
+        db_url = os.environ.get("SUPABASE_DB_URL")
+        if not db_url:
+            log.error("--write-db requested but SUPABASE_DB_URL is not set.")
+            return 2
+        from src.db.writer import write_to_db
+
+        # Sheet first, then post — post rows overwrite sheet rows on
+        # (retailer, retailer_sku) collision, preserving cycle metadata.
+        if sheet_output.run.status in ("success", "partial") and sheet_output.specials:
+            sheet_result = write_to_db(sheet_output, db_url=db_url, log=log)
+            log.info(
+                "pipeline.db_written source=sheet run_id=%s products=%d observations=%d specials=%d",
+                sheet_result.scrape_run_id,
+                sheet_result.products_upserted,
+                sheet_result.observations_written,
+                sheet_result.specials_written,
+            )
+        else:
+            log.warning("Skipping sheet DB write (status=%s)", sheet_output.run.status)
+
+        if post_output.run.status in ("success", "partial") and post_output.specials:
+            post_result = write_to_db(post_output, db_url=db_url, log=log)
+            log.info(
+                "pipeline.db_written source=post run_id=%s products=%d observations=%d specials=%d",
+                post_result.scrape_run_id,
+                post_result.products_upserted,
+                post_result.observations_written,
+                post_result.specials_written,
+            )
+        else:
+            log.warning("Skipping post DB write (status=%s)", post_output.run.status)
 
     if args.write_json:
         out_dir = Path(args.write_json)
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        out_path = out_dir / f"stockup_post_{ts}.json"
-        out_path.write_text(
-            json.dumps(output.to_dict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        log.info("pipeline.json_written", extra={"path": str(out_path)})
+        for name, out in (("stockup_post", post_output), ("stockup_sheet", sheet_output)):
+            out_path = out_dir / f"{name}_{ts}.json"
+            out_path.write_text(
+                json.dumps(out.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            log.info("pipeline.json_written", extra={"path": str(out_path)})
 
-    # Exit code: 0 on success, 1 on no_data, 2 on failure (so cron can alert on 2+).
-    return {"success": 0, "no_data": 1, "partial": 0, "failed": 2}.get(output.run.status, 2)
+    # Exit code: at least one source success = 0. Both failed = 2.
+    # 'no_data' from one source while the other succeeds is still 0.
+    return _exit_code(post_output, sheet_output)
+
+
+def _exit_code(*outputs: ScrapeOutput) -> int:
+    statuses = {o.run.status for o in outputs}
+    if "success" in statuses:
+        return 0
+    if "partial" in statuses:
+        return 0
+    if "no_data" in statuses:
+        return 1
+    return 2
+
+
+def _maybe_load_dotenv() -> None:
+    """Lightweight .env loader. No python-dotenv dependency."""
+    candidates = [Path.cwd() / ".env", Path(__file__).resolve().parent.parent / ".env"]
+    for env_path in candidates:
+        if not env_path.is_file():
+            continue
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+        break
 
 
 if __name__ == "__main__":
