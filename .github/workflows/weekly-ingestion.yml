@@ -1,8 +1,8 @@
 name: weekly-ingestion
 
-# Runs every Wednesday around 1-2am Sydney to catch the StockUp catalogue post.
-# Cron is in UTC. 16:00 UTC Tuesday ≈ 2am AEST Wed / 3am AEDT Wed — safely after
-# the catalogue is up. Manual trigger also exposed for ad-hoc re-runs.
+# Runs every Wednesday around 1-2am Sydney to catch the StockUp catalogue post
+# + the linked Google Sheet. Cron is in UTC. 16:00 UTC Tuesday is ~2am AEST Wed
+# / 3am AEDT Wed — safely after the post is up. Manual trigger also exposed.
 on:
   schedule:
     - cron: "0 16 * * 2"  # 16:00 UTC Tuesday
@@ -13,9 +13,11 @@ permissions:
 
 jobs:
   ingest:
-    name: Scrape weekly catalogue + write artifacts
+    name: Scrape weekly catalogue + write to Supabase
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The sheet write takes ~20 min against Tokyo Supabase due to per-row
+    # round-trips. Generous timeout so a flaky network doesn't kill the run.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -28,23 +30,19 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run ingestion pipeline
+      - name: Run ingestion pipeline (scrape + write to Supabase + JSON backup)
         id: pipeline
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
         run: |
           mkdir -p data/runs
-          python -m src.pipeline --write-json data/runs --verbose
+          python -m src.pipeline --write-db --write-json data/runs --verbose
 
-      - name: Upload run artifact
+      - name: Upload JSON artifact (backup of the raw scrape)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ingestion-${{ github.run_id }}
           path: data/runs/*.json
           retention-days: 30
-
-      # Once Supabase project exists, uncomment and add secrets:
-      # - name: Write to Supabase
-      #   env:
-      #     SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      #     SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-      #   run: python -m src.pipeline --write-db
