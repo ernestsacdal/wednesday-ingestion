@@ -106,6 +106,23 @@ def main(argv: list[str] | None = None) -> int:
         else:
             log.warning("Skipping post DB write (status=%s)", post_output.run.status)
 
+        # Backfill product images for any newly-added products. Bounded so the
+        # weekly cron stays under its 45-min budget — at ~500ms per lookup
+        # (Woolies API + cross-retailer for Coles), 100 products is ~50s
+        # worst case. Expected per week: ~20 new products as the weekly
+        # catalogues drift. The initial ~2,820 are filled by a manual one-
+        # shot run of src.backfill_images.
+        try:
+            from src.backfill_images import fill_missing_images
+            img_stats = fill_missing_images(db_url=db_url, log=log, limit=100, workers=6)
+            log.info(
+                "pipeline.images_filled considered=%d hits=%d misses=%d hit_rate=%.0f%%",
+                img_stats.considered, img_stats.hits, img_stats.misses,
+                img_stats.hit_rate() * 100,
+            )
+        except Exception as e:  # noqa: BLE001 - image fill failure must NOT fail the cron
+            log.exception("pipeline.images_failed err=%s", e)
+
     if args.write_json:
         out_dir = Path(args.write_json)
         out_dir.mkdir(parents=True, exist_ok=True)
