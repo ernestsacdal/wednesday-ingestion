@@ -8,11 +8,18 @@ stamps image_fetched_at = now() on misses so we don't re-attempt every
 run).
 
 Run locally with:
-    python -m src.backfill_coles_images --limit 1000 --workers 2 --verbose
+    python -m src.backfill_coles_images --limit 1000 --workers 1 --verbose
 
-Workers default to 2 because each Playwright context is heavy (~150MB
-RAM). At ~6s per lookup * 0.6 concurrency = ~50 min for 500 products
-on a typical laptop.
+IMPORTANT: workers default to 1. The Session 13 first attempt tried
+--workers 2 and Cloudflare flagged the parallel pattern after ~10
+products — hit rate dropped to ~1% across 266 rows. Single-worker
+runs sustain ~95% hit rate at ~3.6s per lookup. Don't increase this
+without re-validating that Coles' Cloudflare config still tolerates
+parallel sessions.
+
+At ~3.6s per lookup * 1 worker = ~16 min for 270 products. Tolerable
+as a local one-off; no benefit to parallelising when it gets us
+flagged.
 
 This script is intentionally NOT wired into the weekly GHA cron — see
 src/scrapers/coles_playwright.py docstring for why.
@@ -172,7 +179,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Fill products.image_url for Coles rows via Playwright (local-only).",
     )
     parser.add_argument("--limit", type=int, default=1000)
-    parser.add_argument("--workers", type=int, default=2)
+    # Default 1 — Cloudflare flags concurrent contexts (see module docstring).
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
 
