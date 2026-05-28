@@ -3,3 +3,8 @@ beautifulsoup4>=4.12.0
 lxml>=5.0.0
 python-dateutil>=2.9.0
 psycopg[binary]>=3.2.0
+# playwright is used ONLY by src/scrapers/coles_playwright.py for the
+# local-only Coles image backfill — NOT loaded by the weekly cron path
+# (the GHA workflow doesn't install Chromium). Safe to pip-install in
+# CI but it'll never actually launch a browser there.
+playwright>=1.40
