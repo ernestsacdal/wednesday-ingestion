@@ -63,6 +63,35 @@ _PRODUCT_TILE_TIMEOUT_MS = 12_000
 _NORMALISE_RE = re.compile(r"[^a-z0-9\s]+")
 _WHITESPACE_RE = re.compile(r"\s+")
 
+# StockUp catalogue rows often bundle multiple variants into one entry,
+# e.g. "Pantene Miracles Shampoo 650mL or Conditioner 600mL" or
+# "Cadbury Bites or Balls 120g-142g". Coles' search returns nothing for
+# the literal bundle string — we have to extract a searchable prefix.
+_OR_BUNDLE_RE = re.compile(r"\s+or\s+", re.IGNORECASE)
+# Match "120g-142g" / "2.6kg-2.8kg" — keep the first weight only.
+_WEIGHT_RANGE_RE = re.compile(
+    r"(\d+(?:\.\d+)?\s*(?:g|kg|ml|l|each|pk|pack))\s*-\s*\d+(?:\.\d+)?\s*(?:g|kg|ml|l|each|pk|pack)",
+    re.IGNORECASE,
+)
+
+
+def _searchable_query(name: str) -> str:
+    """Reduce a StockUp catalogue name to something Coles' search can find.
+
+    Two-step cleanup:
+      1. " or " bundles  → keep only the prefix before the first " or "
+      2. weight ranges   → "120g-142g" becomes "120g"
+
+    Returns the original name if neither pattern matches, so this is
+    safe to call on every query (no regressions on clean names like
+    "Tim Tam Original 200g").
+    """
+    parts = _OR_BUNDLE_RE.split(name, maxsplit=1)
+    if len(parts) > 1:
+        name = parts[0].rstrip()
+    name = _WEIGHT_RANGE_RE.sub(r"\1", name)
+    return name.strip()
+
 
 @asynccontextmanager
 async def build_browser_context() -> AsyncIterator[BrowserContext]:
@@ -115,6 +144,12 @@ async def lookup_coles_image(
     if not product_name.strip():
         return ImageLookupResult(None, None, "miss", error="empty product name")
 
+    # Normalise once. Searches + scoring both use the cleaned name so a
+    # StockUp bundle ("X or Y 100g-200g") becomes a real product query.
+    search_name = _searchable_query(product_name)
+    if not search_name:
+        return ImageLookupResult(None, None, "miss", error="empty after normalise")
+
     page: Page | None = None
     try:
         page = await context.new_page()
@@ -124,7 +159,7 @@ async def lookup_coles_image(
             lambda route: asyncio.create_task(route.abort()),
         )
 
-        url = _COLES_SEARCH.format(q=_url_q(product_name))
+        url = _COLES_SEARCH.format(q=_url_q(search_name))
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=_PAGE_LOAD_TIMEOUT_MS)
         except PlaywrightTimeoutError:
@@ -170,7 +205,9 @@ async def lookup_coles_image(
             """
         )
 
-        best = _pick_best_card(product_name, cards)
+        # Score candidates against the normalised name so bundle artifacts
+        # ("or Conditioner 600mL") don't poison the overlap denominator.
+        best = _pick_best_card(search_name, cards)
         if best is None:
             return ImageLookupResult(None, None, "miss", error="coles_no_card_match")
 
