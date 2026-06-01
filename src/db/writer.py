@@ -142,12 +142,23 @@ def _upsert_product(cur: psycopg.Cursor, special: WeeklySpecial) -> str:
     sku = _synthetic_sku(special.retailer, special.product_name)
     cur.execute(
         """
-        insert into products (retailer, retailer_sku, name, category, regular_price_cents, last_seen)
-        values (%(retailer)s, %(sku)s, %(name)s, %(category)s, %(regular_price_cents)s, now())
+        insert into products
+            (retailer, retailer_sku, name, category, regular_price_cents, image_url,
+             image_fetched_at, last_seen)
+        values (%(retailer)s, %(sku)s, %(name)s, %(category)s, %(regular_price_cents)s,
+                %(image_url)s,
+                case when %(image_url)s is not null then now() else null end, now())
         on conflict (retailer, retailer_sku) do update
           set name = excluded.name,
               category = excluded.category,
               regular_price_cents = greatest(products.regular_price_cents, excluded.regular_price_cents),
+              -- Keep any existing image; only fill from the source when we have
+              -- one and the row doesn't already.
+              image_url = coalesce(products.image_url, excluded.image_url),
+              image_fetched_at = case
+                when products.image_url is null and excluded.image_url is not null then now()
+                else products.image_fetched_at
+              end,
               last_seen = now()
         returning id::text
         """,
@@ -157,6 +168,7 @@ def _upsert_product(cur: psycopg.Cursor, special: WeeklySpecial) -> str:
             "name": special.product_name,
             "category": special.category,
             "regular_price_cents": special.regular_price_cents,
+            "image_url": special.image_url,
         },
     )
     return cur.fetchone()[0]

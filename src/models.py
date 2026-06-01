@@ -43,6 +43,10 @@ class WeeklySpecial:
     source: ScrapeSource
     source_url: str
     scraped_at: datetime
+    # Optional product image URL when the source provides one directly (e.g. the
+    # Woolworths browse API returns it). Lets the writer persist images without a
+    # separate name-search pass. Defaulted so existing constructors are unaffected.
+    image_url: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)

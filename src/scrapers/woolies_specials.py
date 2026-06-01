@@ -99,6 +99,9 @@ def _to_special(
     if reg_cents <= 0 or sale_cents <= 0 or sale_cents >= reg_cents:
         return None
     discount_pct = round(100 * (reg_cents - sale_cents) / reg_cents)
+    image_url = (
+        p.get("LargeImageFile") or p.get("MediumImageFile") or p.get("SmallImageFile") or None
+    )
     return WeeklySpecial(
         retailer="woolworths",
         product_name=name,
@@ -115,6 +118,7 @@ def _to_special(
         source="woolies_catalogue",
         source_url=f"https://www.woolworths.com.au{_HALF_PRICE_URL}",
         scraped_at=scraped_at,
+        image_url=image_url,
     )
 
 
