@@ -131,8 +131,8 @@ def main(argv: list[str] | None = None) -> int:
         # ~5-15 new Coles products each week. A persistent Cloudflare challenge
         # on the sitemap just skips this run (next week retries).
         try:
-            from src.backfill_coles_images_sitemap import fill_coles_images_sitemap
-            cs_stats = fill_coles_images_sitemap(db_url=db_url, log=log, limit=50)
+            from src.backfill_sitemap_images import fill_sitemap_images
+            cs_stats = fill_sitemap_images(db_url=db_url, log=log, retailer="coles", limit=50)
             log.info(
                 "pipeline.coles_sitemap_filled considered=%d hits=%d misses=%d hit_rate=%.0f%%",
                 cs_stats.considered, cs_stats.hits, cs_stats.misses,
