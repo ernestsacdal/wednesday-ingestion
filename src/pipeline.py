@@ -80,12 +80,23 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         from src.db.writer import write_to_db
 
+        # Woolworths is sourced from its OWN API (authoritative + accurate) by
+        # the refresh step below — StockUp's Woolies rows proved unreliable
+        # (~half were a smaller discount or not on special at all). So we take
+        # only Coles from StockUp here; writing Woolies stockup rows we'd just
+        # delete would waste ~12 min of the cron budget.
+        def _coles_only(out: ScrapeOutput) -> ScrapeOutput:
+            return ScrapeOutput(
+                run=out.run,
+                specials=[s for s in out.specials if s.retailer == "coles"],
+            )
+
         # Sheet first, then post — post rows overwrite sheet rows on
         # (retailer, retailer_sku) collision, preserving cycle metadata.
         if sheet_output.run.status in ("success", "partial") and sheet_output.specials:
-            sheet_result = write_to_db(sheet_output, db_url=db_url, log=log)
+            sheet_result = write_to_db(_coles_only(sheet_output), db_url=db_url, log=log)
             log.info(
-                "pipeline.db_written source=sheet run_id=%s products=%d observations=%d specials=%d",
+                "pipeline.db_written source=sheet(coles) run_id=%s products=%d observations=%d specials=%d",
                 sheet_result.scrape_run_id,
                 sheet_result.products_upserted,
                 sheet_result.observations_written,
@@ -95,9 +106,9 @@ def main(argv: list[str] | None = None) -> int:
             log.warning("Skipping sheet DB write (status=%s)", sheet_output.run.status)
 
         if post_output.run.status in ("success", "partial") and post_output.specials:
-            post_result = write_to_db(post_output, db_url=db_url, log=log)
+            post_result = write_to_db(_coles_only(post_output), db_url=db_url, log=log)
             log.info(
-                "pipeline.db_written source=post run_id=%s products=%d observations=%d specials=%d",
+                "pipeline.db_written source=post(coles) run_id=%s products=%d observations=%d specials=%d",
                 post_result.scrape_run_id,
                 post_result.products_upserted,
                 post_result.observations_written,
@@ -105,6 +116,17 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             log.warning("Skipping post DB write (status=%s)", post_output.run.status)
+
+        # Woolworths: authoritative half-price list from the retailer's own API.
+        # Replaces any leftover StockUp Woolies rows for the week. Guarded so a
+        # transient API failure never fails the cron (worst case: that week's
+        # Woolies list is stale, next run repairs it).
+        try:
+            from src.refresh_woolies_specials import refresh_woolies
+            woolies_written = refresh_woolies(db_url=db_url, log=log)
+            log.info("pipeline.woolies_refreshed written=%d", woolies_written)
+        except Exception as e:  # noqa: BLE001 - must NOT fail the cron
+            log.exception("pipeline.woolies_refresh_failed err=%s", e)
 
         # Backfill product images for any newly-added products. Bounded so the
         # weekly cron stays under its 45-min budget — at ~500ms per lookup
