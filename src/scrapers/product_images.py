@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -246,7 +247,13 @@ def _pick_best_match(
 # ---------------------------------------------------------------------------
 
 def _tokenise(s: str) -> set[str]:
-    """Lowercase + strip punctuation + split. Drops 1-char tokens."""
+    """Fold accents + lowercase + strip punctuation + split. Drops 1-char tokens.
+
+    Accent folding (NFKD -> ASCII) makes a DB product name like "Nescafe"
+    spelled "Nescafé" match the accent-free sitemap slug "nescafe"; without it
+    those rows never resolve. Safe for already-clean names (no-op on ASCII).
+    """
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
     s = s.lower()
     s = _NORMALISE_RE.sub(" ", s)
     s = _WHITESPACE_RE.sub(" ", s).strip()

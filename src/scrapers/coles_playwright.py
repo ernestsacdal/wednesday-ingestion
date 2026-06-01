@@ -73,23 +73,35 @@ _WEIGHT_RANGE_RE = re.compile(
     r"(\d+(?:\.\d+)?\s*(?:g|kg|ml|l|each|pk|pack))\s*-\s*\d+(?:\.\d+)?\s*(?:g|kg|ml|l|each|pk|pack)",
     re.IGNORECASE,
 )
+# Woolworths catalogue names append a department/variant descriptor after a
+# unicode dash that never appears in the sitemap slug, e.g.
+# "... 140g – From the Fridge", "... 500ml – Assorted", "... – Varieties".
+# Strip from the dash onward so the name matches the slug.
+_TRAILING_DEPT_RE = re.compile(
+    r"\s*[‒-―]\s*(?:from the \w+|assorted|varieties)\b.*$",
+    re.IGNORECASE,
+)
+# Leading "NEW " badge (all-caps in the catalogue, e.g. "NEW Phillips Sonicare").
+# Case-sensitive so genuine "New York ..." style names aren't clipped.
+_LEADING_NEW_RE = re.compile(r"^NEW\s+")
 
 
 def _searchable_query(name: str) -> str:
-    """Reduce a StockUp catalogue name to something Coles' search can find.
+    """Reduce a StockUp catalogue name to something a retailer can match.
 
-    Two-step cleanup:
-      1. " or " bundles  → keep only the prefix before the first " or "
-      2. weight ranges   → "120g-142g" becomes "120g"
-
-    Returns the original name if neither pattern matches, so this is
-    safe to call on every query (no regressions on clean names like
-    "Tim Tam Original 200g").
+    Cleanup steps (each safe + idempotent on clean names like
+    "Tim Tam Original 200g"):
+      1. " or " bundles      → keep only the prefix before the first " or "
+      2. weight ranges       → "120g-142g" becomes "120g"
+      3. dept/variant suffix → drop "… – From the Fridge / Assorted / Varieties"
+      4. leading "NEW "      → drop the all-caps new-product badge
     """
     parts = _OR_BUNDLE_RE.split(name, maxsplit=1)
     if len(parts) > 1:
         name = parts[0].rstrip()
     name = _WEIGHT_RANGE_RE.sub(r"\1", name)
+    name = _TRAILING_DEPT_RE.sub("", name)
+    name = _LEADING_NEW_RE.sub("", name)
     return name.strip()
 
 
