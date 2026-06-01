@@ -34,6 +34,9 @@ jobs:
         id: pipeline
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # Optional: enables the bounded Coles-image step (Brave Search + CDN).
+          # Absent = pipeline logs coles_brave_skipped and no-ops.
+          BRAVE_SEARCH_API_KEY: ${{ secrets.BRAVE_SEARCH_API_KEY }}
           PYTHONIOENCODING: utf-8
         run: |
           mkdir -p data/runs
