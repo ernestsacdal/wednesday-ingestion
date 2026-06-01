@@ -32,12 +32,8 @@ Public surface:
     lookup_coles_image_brave(session, product_name, log, *, api_key) -> ImageLookupResult
     build_brave_session() -> requests.Session
 
-Per-call cost: 1 GET to Brave's API. Brave's free tier caps at 1 query/sec,
-so the caller paces with ``time.sleep(1.1)``.
-
-NOTE (commit 2 of the Session 15 cadence): this step resolves the canonical
-product URL + match score but returns ``image_url=None``. Commit 3 adds the
-deterministic CDN URL + HEAD verification and wires it into the result.
+Per-call cost: 1 GET to Brave's API + 1 HEAD to the CDN. Brave's free tier
+caps at 1 query/sec, so the caller paces with ``time.sleep(1.1)``.
 """
 from __future__ import annotations
 
@@ -74,6 +70,34 @@ def build_brave_session() -> requests.Session:
 def _cdn_image_url(pid: str) -> str:
     """Deterministic Coles CDN image URL for a numeric product ID."""
     return f"https://cdn.productimages.coles.com.au/productimages/{pid[0]}/{pid}.jpg"
+
+
+def _verify_cdn_image(
+    session: requests.Session, url: str, log: logging.Logger,
+) -> bool:
+    """True if the CDN URL is a real image (200 + image/* content-type).
+
+    HEAD is enough for the Coles CDN (returns 200 + image/jpg). Some CDN
+    edges reject HEAD with 403/405 — fall back to a 1-byte ranged GET so a
+    quirky edge doesn't cause a false miss. A genuinely-missing image 404s.
+    """
+    resp = None
+    try:
+        resp = session.head(url, timeout=15, allow_redirects=True)
+    except requests.RequestException as e:
+        log.debug("cdn.head_error", extra={"url": url, "error": str(e)})
+
+    if resp is None or resp.status_code in (403, 405):
+        try:
+            resp = session.get(
+                url, headers={"Range": "bytes=0-0"}, timeout=15, allow_redirects=True
+            )
+        except requests.RequestException as e:
+            log.debug("cdn.get_error", extra={"url": url, "error": str(e)})
+            return False
+
+    ct = resp.headers.get("Content-Type", "")
+    return resp.status_code in (200, 206) and ct.startswith("image/")
 
 
 def lookup_coles_image_brave(
@@ -154,17 +178,25 @@ def lookup_coles_image_brave(
 
     slug, pid, score = best
     canonical_url = f"https://www.coles.com.au/product/{slug}-{pid}"
+    image_url = _cdn_image_url(pid)
     log.info(
         "brave.match",
         extra={"query": search_name, "url": canonical_url, "score": round(score, 2)},
     )
-    # Commit 3 adds the CDN URL + HEAD verify and sets method/image_url.
-    # For now report the recovered canonical URL + score so the smoke test
-    # confirms scoring picks the right product.
+
+    if not _verify_cdn_image(session, image_url, log):
+        # We found the right product page but the CDN has no image at the
+        # deterministic path (rare). Treat as a confident miss with the
+        # canonical URL preserved for debugging.
+        log.info("cdn.miss", extra={"image_url": image_url})
+        return ImageLookupResult(
+            None, canonical_url, "miss", score=score, error="cdn_image_not_found"
+        )
+
     return ImageLookupResult(
-        image_url=None,
+        image_url=image_url,
         canonical_product_url=canonical_url,
-        method="miss",
+        method="coles_brave_cdn",
         score=score,
     )
 
