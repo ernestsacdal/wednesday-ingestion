@@ -78,7 +78,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 ImageLookupMethod = Literal[
     "woolies_api_direct",         # Woolies product matched against Woolies API
     "woolies_api_cross_retailer", # Coles product matched against Woolies API by name
-    "coles_brave_cdn",            # Coles product resolved via Brave Search -> deterministic CDN
+    "coles_sitemap_cdn",          # Coles product resolved via the product sitemap -> deterministic CDN
     "miss",
 ]
 

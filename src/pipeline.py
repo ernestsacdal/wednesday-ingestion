@@ -124,29 +124,22 @@ def main(argv: list[str] | None = None) -> int:
             log.exception("pipeline.images_failed err=%s", e)
 
         # Second image pass: Coles house brands the Woolies cross-match can't
-        # resolve, via Brave Search + the deterministic Coles CDN. Gated on
-        # BRAVE_SEARCH_API_KEY (absent = no-op). Bounded to 25 queries/run
-        # (~100/month, well under Brave's free 2,000/month) and ~30s added
-        # to the cron at 1.1s/query. The initial backlog is cleared by a
-        # local one-shot of src.backfill_coles_images_brave; thereafter this
-        # picks up the ~5-15 new Coles products each week.
-        brave_key = os.environ.get("BRAVE_SEARCH_API_KEY")
-        if not brave_key:
-            log.info("pipeline.coles_brave_skipped reason=no_api_key")
-        else:
-            try:
-                from src.backfill_coles_images_brave import fill_coles_images_brave
-                cb_stats = fill_coles_images_brave(
-                    db_url=db_url, log=log, limit=25, max_queries=25, api_key=brave_key,
-                )
-                log.info(
-                    "pipeline.coles_brave_filled considered=%d hits=%d misses=%d "
-                    "transient=%d hit_rate=%.0f%%",
-                    cb_stats.considered, cb_stats.hits, cb_stats.misses,
-                    cb_stats.transient, cb_stats.hit_rate() * 100,
-                )
-            except Exception as e:  # noqa: BLE001 - must NOT fail the cron
-                log.exception("pipeline.coles_brave_failed err=%s", e)
+        # resolve, via the Coles product sitemap + deterministic CDN. Card-free
+        # and key-free. Bounded to 50 rows/run so the cron stays snappy; the
+        # initial backlog is cleared by a local one-shot of
+        # src.backfill_coles_images_sitemap, after which this picks up the
+        # ~5-15 new Coles products each week. A persistent Cloudflare challenge
+        # on the sitemap just skips this run (next week retries).
+        try:
+            from src.backfill_coles_images_sitemap import fill_coles_images_sitemap
+            cs_stats = fill_coles_images_sitemap(db_url=db_url, log=log, limit=50)
+            log.info(
+                "pipeline.coles_sitemap_filled considered=%d hits=%d misses=%d hit_rate=%.0f%%",
+                cs_stats.considered, cs_stats.hits, cs_stats.misses,
+                cs_stats.hit_rate() * 100,
+            )
+        except Exception as e:  # noqa: BLE001 - must NOT fail the cron
+            log.exception("pipeline.coles_sitemap_failed err=%s", e)
 
     if args.write_json:
         out_dir = Path(args.write_json)
