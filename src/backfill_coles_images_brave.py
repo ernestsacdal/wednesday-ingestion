@@ -7,10 +7,16 @@ remaining image-coverage gap — without touching Coles' Cloudflare: a
 image comes from the deterministic CDN (see src/scrapers/coles_brave.py).
 
 Walks ``products WHERE retailer='coles' AND image_url IS NULL AND
-image_fetched_at IS NULL`` and, for each row:
+coles_brave_fetched_at IS NULL`` and, for each row:
   * HIT             -> set image_url + source_product_url + image_fetched_at
-  * confident miss  -> stamp image_fetched_at = now() (don't re-attempt)
+                       + coles_brave_fetched_at
+  * confident miss  -> stamp coles_brave_fetched_at = now() (don't re-attempt)
   * transient error -> leave the row untouched (retry on a later run)
+
+The picker keys on coles_brave_fetched_at — NOT image_fetched_at — because
+the target rows are exactly the ones the Woolies-API pass already missed (so
+they all carry a stamped image_fetched_at). See migration 0012 for the full
+rationale.
 
 Synchronous + single-threaded: Brave's free tier caps at 1 query/sec, so we
 pace with time.sleep(1.1) and there's nothing to parallelise. The
@@ -61,7 +67,7 @@ _SELECT_QUEUE = """
       from products
      where retailer = 'coles'
        and image_url is null
-       and image_fetched_at is null
+       and coles_brave_fetched_at is null
      order by last_seen desc nulls last
      limit %(limit)s
 """
@@ -70,13 +76,14 @@ _UPDATE_HIT = """
     update products
        set image_url = %(url)s,
            source_product_url = %(purl)s,
-           image_fetched_at = now()
+           image_fetched_at = now(),
+           coles_brave_fetched_at = now()
      where id = %(id)s::uuid
 """
 
 _STAMP_MISS = """
     update products
-       set image_fetched_at = now()
+       set coles_brave_fetched_at = now()
      where id = %(id)s::uuid
 """
 
