@@ -43,8 +43,11 @@ _NEXT_DATA_RE = re.compile(
 )
 _PAGE_SIZE = 48
 _MAX_PAGES = 40  # safety ceiling; real count ~24 pages
-_DELAY_SECONDS = 1.5
-_CHALLENGE_BACKOFFS_S = (15, 45, 90)
+# Coles rate-limits ~5-6 requests/window via Cloudflare, so pace gently and,
+# on a challenge, back off long enough (no requests) for the token bucket to
+# refill before resuming.
+_DELAY_SECONDS = 5.0
+_CHALLENGE_BACKOFFS_S = (60, 120, 240)
 
 _BROWSER_HEADERS = {
     "User-Agent": (
@@ -96,6 +99,30 @@ def _fetch_search_results(session: requests.Session, page: int, log: logging.Log
             except (ValueError, AttributeError):
                 pass
     raise ColesChallenged(f"persistent Cloudflare challenge for {url}")
+
+
+def fetch_search_results_once(session: requests.Session, page: int) -> dict[str, Any] | None:
+    """Single GET of one half-price page. Returns the searchResults dict, or
+    None when Cloudflare challenges (no __NEXT_DATA__). No internal retry — the
+    trickle runner owns the long-quiet backoff so it never pokes during the
+    rate-limit cooldown."""
+    url = f"{_HALF_PRICE_URL}&page={page}"
+    resp = session.get(url, timeout=25)
+    m = _NEXT_DATA_RE.search(resp.text)
+    if resp.status_code == 200 and m:
+        try:
+            data = json.loads(m.group(1))
+            sr = data.get("props", {}).get("pageProps", {}).get("searchResults")
+            if isinstance(sr, dict):
+                return sr
+        except (ValueError, AttributeError):
+            pass
+    return None
+
+
+def to_special(p: dict[str, Any], *, week_start, week_end, scraped_at) -> WeeklySpecial | None:
+    """Public wrapper around the row mapper for the trickle runner."""
+    return _to_special(p, week_start=week_start, week_end=week_end, scraped_at=scraped_at)
 
 
 def _to_special(p: dict[str, Any], *, week_start, week_end, scraped_at) -> WeeklySpecial | None:
