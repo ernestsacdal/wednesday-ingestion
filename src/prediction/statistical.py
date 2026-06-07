@@ -51,6 +51,15 @@ MAX_WINDOW_HALFWIDTH_WEEKS = 4
 # some honest fuzz instead of pretending we know the date exactly.
 STDDEV_FLOOR_WEEKS_N1 = 1.5
 
+# Stddev floor for low-cycle predictions (n in 2..3). With only 2-3 intervals,
+# a coincidentally-zero stddev would produce a zero-width window — overstates
+# confidence. Floor to 1.0 weeks until we have ≥4 cycles to be honest about it.
+STDDEV_FLOOR_WEEKS_LOW_N = 1.0
+
+# Intervals below this many weeks likely indicate the same multi-week sale
+# rather than a real cycle (groceries rarely cycle weekly). Filtered out.
+MIN_CYCLE_INTERVAL_WEEKS = 2
+
 
 def _load_specials_from_json(path: Path, log: logging.Logger) -> list[WeeklySpecial]:
     """Hydrate WeeklySpecial dataclasses from a scraper-produced JSON dump."""
@@ -82,6 +91,42 @@ def _load_specials_from_json(path: Path, log: logging.Logger) -> list[WeeklySpec
 def _key(s: WeeklySpecial) -> tuple[Retailer, str]:
     """Per-product grouping key. Names normalised lightly to dedup near-dupes."""
     return s.retailer, s.product_name.strip()
+
+
+def _derive_intervals(entries: list[tuple[date, int | None]]) -> list[int]:
+    """Derive cycle intervals (in weeks) for one product.
+
+    Two sources, combined as a deduplicated set of inferred sale dates:
+      1. Each entry's `week_start` is an observed half-price week.
+      2. Each entry's `last_halfprice_weeks_ago` hint implies a prior sale
+         at week_start - N weeks (when present, e.g. from current-week
+         StockUp posts that include the cycle column).
+
+    Sales within 1 week of each other are treated as the same event to
+    avoid double-counting hint+observed overlap.
+    """
+    sale_dates: list[date] = []
+    for week_start, hint in entries:
+        sale_dates.append(week_start)
+        if hint is not None and hint > 0:
+            sale_dates.append(week_start - timedelta(weeks=hint))
+
+    sale_dates.sort()
+    # Dedupe near-duplicate dates (within 7 days).
+    deduped: list[date] = []
+    for d in sale_dates:
+        if deduped and (d - deduped[-1]).days < 7:
+            continue
+        deduped.append(d)
+
+    intervals: list[int] = []
+    for i in range(1, len(deduped)):
+        weeks = round((deduped[i] - deduped[i - 1]).days / 7)
+        # Filter intervals < MIN_CYCLE_INTERVAL_WEEKS — likely the same
+        # multi-week sale rather than a real cycle.
+        if weeks >= MIN_CYCLE_INTERVAL_WEEKS:
+            intervals.append(weeks)
+    return intervals
 
 
 def _confidence_tier(score: float) -> ConfidenceTier:
@@ -139,6 +184,10 @@ def _predict_for_product(
     mean_w = statistics.fmean(intervals_weeks)
     if n >= 2:
         stddev_w = statistics.stdev(intervals_weeks)
+        # Honest floor for low-cycle predictions where zero variance is a
+        # coincidence of small N rather than real precision.
+        if n < 4:
+            stddev_w = max(stddev_w, STDDEV_FLOOR_WEEKS_LOW_N)
     else:
         stddev_w = STDDEV_FLOOR_WEEKS_N1
     half_width = min(stddev_w, MAX_WINDOW_HALFWIDTH_WEEKS)
@@ -186,7 +235,7 @@ def compute_predictions(
     now = datetime.now(timezone.utc)
 
     for (retailer, name), entries in by_product.items():
-        intervals = [w for (_d, w) in entries if w is not None and w > 0]
+        intervals = _derive_intervals(entries)
         last_sale = max(d for (d, _w) in entries)
         result = _predict_for_product(intervals, last_sale, today=today, min_cycles=min_cycles)
         if result is None:
@@ -254,12 +303,37 @@ def _resolve_input_path(pattern: str) -> Path:
     return p
 
 
+def _maybe_load_dotenv() -> None:
+    """Load .env from cwd or repo root so SUPABASE_DB_URL is picked up."""
+    import os
+    from pathlib import Path
+    candidates = [Path.cwd() / ".env", Path(__file__).resolve().parent.parent.parent / ".env"]
+    for env_path in candidates:
+        if not env_path.is_file():
+            continue
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+        break
+
+
 def main(argv: list[str] | None = None) -> int:
+    import os
     parser = argparse.ArgumentParser(
         prog="wednesday-prediction-statistical",
-        description="Statistical cycle predictor (v1). Reads scraper JSON, emits predictions JSON.",
+        description="Statistical cycle predictor (v1). Reads scraper JSON OR live Supabase, emits predictions JSON OR writes to predictions table.",
     )
-    parser.add_argument("input", help="Path or glob to a scraper-produced JSON dump")
+    parser.add_argument("input", nargs="?", help="Path or glob to a scraper-produced JSON dump. Omit when using --from-db.")
+    parser.add_argument("--from-db", action="store_true",
+                        help="Read specials from Supabase instead of a JSON file (uses SUPABASE_DB_URL).")
+    parser.add_argument("--write-db", action="store_true",
+                        help="Write predictions to Supabase predictions table (uses SUPABASE_DB_URL).")
     parser.add_argument("--output", metavar="DIR", help="Directory to write predictions JSON (created if missing)")
     parser.add_argument("--min-cycles", type=int, default=DEFAULT_MIN_CYCLES,
                         help=f"Minimum historical intervals to emit a prediction (default {DEFAULT_MIN_CYCLES})")
@@ -267,15 +341,31 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     log = configure_logging(verbose=args.verbose)
-    try:
-        input_path = _resolve_input_path(args.input)
-    except FileNotFoundError as e:
-        log.error("predict.input_missing", extra={"pattern": args.input, "error": str(e)})
+
+    if args.from_db or args.write_db:
+        _maybe_load_dotenv()
+    db_url = os.environ.get("SUPABASE_DB_URL") if (args.from_db or args.write_db) else None
+    if (args.from_db or args.write_db) and not db_url:
+        log.error("SUPABASE_DB_URL not set; required for --from-db / --write-db")
         return 2
 
-    log.info("predict.start", extra={"input": str(input_path), "min_cycles": args.min_cycles})
+    if args.from_db:
+        # Lazy import so the JSON-only path doesn't require psycopg.
+        from src.db.reader import load_specials_from_db
+        specials = load_specials_from_db(db_url, log)
+        log.info("predict.start source=db min_cycles=%d", args.min_cycles)
+    else:
+        if not args.input:
+            log.error("Either INPUT path or --from-db is required.")
+            return 2
+        try:
+            input_path = _resolve_input_path(args.input)
+        except FileNotFoundError as e:
+            log.error("predict.input_missing pattern=%s error=%s", args.input, e)
+            return 2
+        log.info("predict.start source=%s min_cycles=%d", input_path, args.min_cycles)
+        specials = _load_specials_from_json(input_path, log)
 
-    specials = _load_specials_from_json(input_path, log)
     if not specials:
         log.error("predict.no_specials_in_input")
         return 1
@@ -304,6 +394,14 @@ def main(argv: list[str] | None = None) -> int:
         }
         out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         log.info("predict.json_written", extra={"path": str(out_path)})
+
+    if args.write_db:
+        from src.db.writer import write_predictions_to_db
+        result = write_predictions_to_db(predictions, db_url=db_url, log=log)
+        log.info(
+            "predict.db_written inserted=%d unmatched=%d",
+            result.inserted, result.skipped_unmatched,
+        )
 
     return 0
 
