@@ -289,10 +289,10 @@ def write_predictions_to_db(
                     """
                     insert into predictions
                         (product_id, predicted_window_start, predicted_window_end,
-                         confidence, method, mean_interval_weeks, stddev_weeks,
+                         confidence, confidence_tier, method, mean_interval_weeks, stddev_weeks,
                          cycle_count, computed_at)
                     values (%(product_id)s::uuid, %(ws)s, %(we)s,
-                            %(confidence)s, %(method)s, %(mean)s, %(stddev)s,
+                            %(confidence)s, %(confidence_tier)s, %(method)s, %(mean)s, %(stddev)s,
                             %(cycle_count)s, %(computed_at)s)
                     on conflict (product_id, computed_at) do nothing
                     """,
@@ -301,6 +301,7 @@ def write_predictions_to_db(
                         "ws": p.predicted_window_start,
                         "we": p.predicted_window_end,
                         "confidence": p.confidence,
+                        "confidence_tier": p.confidence_tier,
                         "method": p.method,
                         "mean": p.mean_interval_weeks,
                         "stddev": p.stddev_weeks,
