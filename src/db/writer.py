@@ -179,18 +179,21 @@ def _insert_observation(
     product_id: str,
     special: WeeklySpecial,
 ) -> bool:
-    """Insert one price_observation row for the current week's sale price.
+    """Upsert one price_observation row for the current week's sale price.
 
-    Returns True on insert. There is no natural unique key for (product, date,
-    source) in the schema, so re-running the pipeline will produce a duplicate
-    row — acceptable for now since the predictor groups by week. A later
-    migration can add a unique constraint if dedup becomes important.
+    Idempotent on (product_id, observed_at, source) — the unique constraint
+    added in migration 0013 — so re-running the pipeline within a week updates
+    the row instead of duplicating it.
     """
     cur.execute(
         """
         insert into price_observations
             (product_id, price_cents, is_special, discount_pct, observed_at, source)
         values (%(product_id)s::uuid, %(price_cents)s, %(is_special)s, %(discount_pct)s, %(observed_at)s, %(source)s)
+        on conflict (product_id, observed_at, source) do update
+          set price_cents = excluded.price_cents,
+              is_special = excluded.is_special,
+              discount_pct = excluded.discount_pct
         """,
         {
             "product_id": product_id,
