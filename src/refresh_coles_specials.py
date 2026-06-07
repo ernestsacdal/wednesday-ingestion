@@ -42,7 +42,24 @@ _QUIET_GAP_S = 900       # 15 min of true quiet after a challenge — lets the b
 _PAGE_DELAY_S = 5        # polite gap between successful pages
 _MAX_QUIET_WAITS = 10    # give up after this many consecutive failed waits (~2.5 hr cap)
 _MAX_PAGES = 40
-_COMPLETE_FRACTION = 0.97
+# "Complete" = collected within 10% OR within an absolute slack of the catalogue
+# total. The absolute slack absorbs week-to-week catalogue churn (a few products
+# ending) that would otherwise make a valid full pull read as "incomplete".
+_COMPLETE_FRACTION = 0.90
+_COMPLETE_ABS_SLACK = 40
+_SLEEP_CHUNK_S = 30      # heartbeat granularity during a quiet gap
+
+
+def _sleep_with_heartbeat(seconds: int, log: logging.Logger) -> None:
+    """Sleep in short chunks with a heartbeat log, so a long quiet gap looks
+    alive (not hung) and Ctrl-C lands promptly between chunks rather than being
+    swallowed by one 15-minute blocking call."""
+    waited = 0
+    while waited < seconds:
+        time.sleep(min(_SLEEP_CHUNK_S, seconds - waited))
+        waited += _SLEEP_CHUNK_S
+        if waited < seconds:
+            log.info("coles_trickle.waiting %ds/%ds", min(waited, seconds), seconds)
 
 
 def _load_progress() -> dict:
@@ -88,7 +105,7 @@ def trickle(log: logging.Logger) -> tuple[list[dict], int | None, bool]:
             if quiet_waits > _MAX_QUIET_WAITS:
                 log.error("coles_trickle.giving_up after %d quiet waits", quiet_waits)
                 break
-            time.sleep(_QUIET_GAP_S)
+            _sleep_with_heartbeat(_QUIET_GAP_S, log)
             continue
 
         quiet_waits = 0
@@ -120,7 +137,10 @@ def trickle(log: logging.Logger) -> tuple[list[dict], int | None, bool]:
         page += 1
         time.sleep(_PAGE_DELAY_S)
 
-    complete = bool(total) and len(products) >= total * _COMPLETE_FRACTION
+    complete = bool(total) and (
+        len(products) >= total * _COMPLETE_FRACTION
+        or len(products) >= total - _COMPLETE_ABS_SLACK
+    )
     return list(products.values()), total, complete
 
 
@@ -142,6 +162,11 @@ def _load_dotenv() -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="refresh_coles_specials")
     parser.add_argument("--verbose", "-v", action="store_true")
+    parser.add_argument(
+        "--force-write", action="store_true",
+        help="Publish + replace StockUp even if the collection is incomplete "
+             "(manual override for a run stuck behind Cloudflare; requires >=50%% collected).",
+    )
     args = parser.parse_args(argv)
     log = configure_logging(verbose=args.verbose)
 
@@ -168,10 +193,21 @@ def main(argv: list[str] | None = None) -> int:
     log.info("coles_trickle.mapped products=%d specials=%d complete=%s total=%s",
              len(products), len(specials), complete, total)
 
-    if not complete:
+    if not complete and not args.force_write:
         log.warning("coles_trickle.incomplete collected=%d/%s — NOT replacing StockUp; "
-                    "re-run to resume from saved progress", len(products), total)
+                    "re-run to resume, or pass --force-write to publish a partial set",
+                    len(products), total)
         return 1
+    if not complete:
+        # Force-write override: refuse if we have so little that replacing
+        # StockUp would gut Coles coverage; otherwise publish the partial set.
+        if total and len(products) < total * 0.5:
+            log.error("coles_trickle.force_refused collected=%d/%s is under 50%% — too little to "
+                      "replace StockUp; resume the scrape first", len(products), total)
+            return 1
+        log.warning("coles_trickle.force_write publishing PARTIAL set collected=%d/%s — StockUp "
+                    "Coles will be replaced; uncollected items show no current special",
+                    len(products), total)
 
     # Full set collected: write authoritative Coles + delete the week's StockUp Coles.
     run = ScrapeRun(source="coles_catalogue", started_at=scraped_at,
