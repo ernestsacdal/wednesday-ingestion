@@ -149,8 +149,8 @@ def main(argv: list[str] | None = None) -> int:
         # resolve, via the Coles product sitemap + deterministic CDN. Card-free
         # and key-free. Bounded to 50 rows/run so the cron stays snappy; the
         # initial backlog is cleared by a local one-shot of
-        # src.backfill_coles_images_sitemap, after which this picks up the
-        # ~5-15 new Coles products each week. A persistent Cloudflare challenge
+        # `src.backfill_sitemap_images --retailer coles`, after which this picks
+        # up the ~5-15 new Coles products each week. A persistent Cloudflare challenge
         # on the sitemap just skips this run (next week retries).
         try:
             from src.backfill_sitemap_images import fill_sitemap_images

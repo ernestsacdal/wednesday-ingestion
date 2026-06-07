@@ -13,3 +13,4 @@ __pycache__/
 data/raw/
 data/cached/
 data/runs/
+data/coles_trickle_progress.json
