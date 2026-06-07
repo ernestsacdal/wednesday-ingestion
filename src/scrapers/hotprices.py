@@ -235,6 +235,11 @@ def scrape(log: logging.Logger, *, today: date | None = None) -> ScrapeOutput:
         if not p.is_current_half or p.current_sale_cents is None:
             continue
         pct = p.current_discount_pct or 0
+        # Hard half-price floor: never emit a sub-half "special". Guards the
+        # baseline-calc edge case where a recent flat price can make the derived
+        # discount understate (even to ~0) despite the event-path flagging it.
+        if pct < 48:
+            continue
         specials.append(WeeklySpecial(
             retailer="coles",
             product_name=p.name,
