@@ -1,21 +1,27 @@
 """CLI orchestrator for the weekly ingestion pipeline.
 
-Runs both StockUp scrapers (post + Google Sheet), then optionally
-writes the results to JSON, to Supabase, or both. Supabase write
-maps records onto products / price_observations / specials /
-scrape_runs — see src/db/writer.py.
+Both retailers now come from authoritative sources, replacing the old
+StockUp/OzBargain scrape (which proved unreliable — a price tracker, not
+"this week's specials"):
 
-Cross-source order matters: when --write-db is set, we write the
-**sheet first, post second**, so post rows overwrite sheet rows on
-(retailer, retailer_sku) collisions. That preserves the post's
-richer per-row cycle metadata (the post has populated
-'last_halfprice_weeks_ago'; the sheet is sparser on cycle data).
+  * Coles      — derived from the public hotprices.org daily dump
+                 (src/refresh_coles_hotprices.py). We consume their hosted JSON,
+                 so we never touch Coles' Cloudflare/Imperva gate, and cache it
+                 into our own tables (source='hotprices').
+  * Woolworths — the retailer's own browse API
+                 (src/refresh_woolies_specials.py, source='woolies_catalogue').
+
+Each refresh is guarded so a transient failure in one never fails the cron or
+touches the other retailer's data (worst case: that retailer's list is stale for
+a week, repaired on the next run).
+
+The deep Coles half-price HISTORY (for the cycle predictor) is loaded once by
+src/backfill_coles_history.py; the weekly refresh keeps the current week fresh.
 
 Examples:
-    python -m src.pipeline                            # both scrapes, log to console
-    python -m src.pipeline --write-json out/          # both scrapes + JSON dumps
-    python -m src.pipeline --write-db                 # both scrapes + DB writes
+    python -m src.pipeline --write-db                 # both refreshes + images
     python -m src.pipeline --write-db --verbose       # DEBUG logging
+    python -m src.pipeline --write-json out/          # dump current scrapes to JSON
 """
 from __future__ import annotations
 
@@ -26,9 +32,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.models import ScrapeOutput
-from src.scrapers import ozbargain_stockup, stockup_sheet
-from src.scrapers.base import build_session, configure_logging
+from src.scrapers.base import configure_logging
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -39,13 +43,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--write-json",
         metavar="DIR",
-        help="Directory to write JSON dumps of each scrape (created if missing).",
+        help="Directory to dump the current Coles + Woolies scrapes as JSON (created if missing).",
     )
     parser.add_argument(
         "--write-db",
         action="store_true",
-        help="Write to Supabase via SUPABASE_DB_URL (Session Pooler URI). "
-             "Loads .env from the project root if present.",
+        help="Refresh Coles + Woolies specials in Supabase via SUPABASE_DB_URL "
+             "(Session Pooler URI). Loads .env from the project root if present.",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -57,70 +61,23 @@ def main(argv: list[str] | None = None) -> int:
     log = configure_logging(verbose=args.verbose)
     log.info("pipeline.start", extra={"verbose": args.verbose})
 
-    session = build_session()
-
-    # Run both scrapers. Each is independent — failures in one don't
-    # block the other.
-    post_output = ozbargain_stockup.scrape(session, log)
-    sheet_output = stockup_sheet.scrape(session, log)
-
-    log.info(
-        "pipeline.result post_status=%s post_items=%d sheet_status=%s sheet_items=%d",
-        post_output.run.status,
-        post_output.run.items_found,
-        sheet_output.run.status,
-        sheet_output.run.items_found,
-    )
-
     if args.write_db:
         _maybe_load_dotenv()
         db_url = os.environ.get("SUPABASE_DB_URL")
         if not db_url:
             log.error("--write-db requested but SUPABASE_DB_URL is not set.")
             return 2
-        from src.db.writer import write_to_db
 
-        # Woolworths is sourced from its OWN API (authoritative + accurate) by
-        # the refresh step below — StockUp's Woolies rows proved unreliable
-        # (~half were a smaller discount or not on special at all). So we take
-        # only Coles from StockUp here; writing Woolies stockup rows we'd just
-        # delete would waste ~12 min of the cron budget.
-        def _coles_only(out: ScrapeOutput) -> ScrapeOutput:
-            return ScrapeOutput(
-                run=out.run,
-                specials=[s for s in out.specials if s.retailer == "coles"],
-            )
+        # Coles: authoritative half-price from the hotprices.org daily dump.
+        # Replaces this week's Coles specials + removes any leftover StockUp rows.
+        try:
+            from src.refresh_coles_hotprices import refresh_coles
+            coles_written = refresh_coles(db_url=db_url, log=log)
+            log.info("pipeline.coles_refreshed written=%d", coles_written)
+        except Exception as e:  # noqa: BLE001 - must NOT fail the cron
+            log.exception("pipeline.coles_refresh_failed err=%s", e)
 
-        # Sheet first, then post — post rows overwrite sheet rows on
-        # (retailer, retailer_sku) collision, preserving cycle metadata.
-        if sheet_output.run.status in ("success", "partial") and sheet_output.specials:
-            sheet_result = write_to_db(_coles_only(sheet_output), db_url=db_url, log=log)
-            log.info(
-                "pipeline.db_written source=sheet(coles) run_id=%s products=%d observations=%d specials=%d",
-                sheet_result.scrape_run_id,
-                sheet_result.products_upserted,
-                sheet_result.observations_written,
-                sheet_result.specials_written,
-            )
-        else:
-            log.warning("Skipping sheet DB write (status=%s)", sheet_output.run.status)
-
-        if post_output.run.status in ("success", "partial") and post_output.specials:
-            post_result = write_to_db(_coles_only(post_output), db_url=db_url, log=log)
-            log.info(
-                "pipeline.db_written source=post(coles) run_id=%s products=%d observations=%d specials=%d",
-                post_result.scrape_run_id,
-                post_result.products_upserted,
-                post_result.observations_written,
-                post_result.specials_written,
-            )
-        else:
-            log.warning("Skipping post DB write (status=%s)", post_output.run.status)
-
-        # Woolworths: authoritative half-price list from the retailer's own API.
-        # Replaces any leftover StockUp Woolies rows for the week. Guarded so a
-        # transient API failure never fails the cron (worst case: that week's
-        # Woolies list is stale, next run repairs it).
+        # Woolworths: authoritative half-price from the retailer's own API.
         try:
             from src.refresh_woolies_specials import refresh_woolies
             woolies_written = refresh_woolies(db_url=db_url, log=log)
@@ -128,12 +85,10 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:  # noqa: BLE001 - must NOT fail the cron
             log.exception("pipeline.woolies_refresh_failed err=%s", e)
 
-        # Backfill product images for any newly-added products. Bounded so the
-        # weekly cron stays under its 45-min budget — at ~500ms per lookup
-        # (Woolies API + cross-retailer for Coles), 100 products is ~50s
-        # worst case. Expected per week: ~20 new products as the weekly
-        # catalogues drift. The initial ~2,820 are filled by a manual one-
-        # shot run of src.backfill_images.
+        # Backfill product images for any rows still missing one. hotprices already
+        # supplies Coles images via the deterministic CDN and the Woolies API
+        # supplies its own, so this only mops up the occasional new Woolies miss
+        # via the cross-retailer match. Bounded to keep the cron snappy.
         try:
             from src.backfill_images import fill_missing_images
             img_stats = fill_missing_images(db_url=db_url, log=log, limit=100, workers=6)
@@ -145,50 +100,30 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:  # noqa: BLE001 - image fill failure must NOT fail the cron
             log.exception("pipeline.images_failed err=%s", e)
 
-        # Second image pass: Coles house brands the Woolies cross-match can't
-        # resolve, via the Coles product sitemap + deterministic CDN. Card-free
-        # and key-free. Bounded to 50 rows/run so the cron stays snappy; the
-        # initial backlog is cleared by a local one-shot of
-        # `src.backfill_sitemap_images --retailer coles`, after which this picks
-        # up the ~5-15 new Coles products each week. A persistent Cloudflare challenge
-        # on the sitemap just skips this run (next week retries).
-        try:
-            from src.backfill_sitemap_images import fill_sitemap_images
-            cs_stats = fill_sitemap_images(db_url=db_url, log=log, retailer="coles", limit=50)
-            log.info(
-                "pipeline.coles_sitemap_filled considered=%d hits=%d misses=%d hit_rate=%.0f%%",
-                cs_stats.considered, cs_stats.hits, cs_stats.misses,
-                cs_stats.hit_rate() * 100,
-            )
-        except Exception as e:  # noqa: BLE001 - must NOT fail the cron
-            log.exception("pipeline.coles_sitemap_failed err=%s", e)
+        log.info("pipeline.done")
+        return 0
 
     if args.write_json:
+        from src.scrapers.hotprices import scrape as coles_scrape
+        from src.scrapers.woolies_specials import build_woolies_session
+        from src.scrapers.woolies_specials import scrape as woolies_scrape
+
+        coles_out = coles_scrape(log)
+        woolies_out = woolies_scrape(build_woolies_session(), log)
         out_dir = Path(args.write_json)
         out_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        for name, out in (("stockup_post", post_output), ("stockup_sheet", sheet_output)):
+        for name, out in (("coles_hotprices", coles_out), ("woolies_catalogue", woolies_out)):
             out_path = out_dir / f"{name}_{ts}.json"
             out_path.write_text(
                 json.dumps(out.to_dict(), indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
             log.info("pipeline.json_written", extra={"path": str(out_path)})
-
-    # Exit code: at least one source success = 0. Both failed = 2.
-    # 'no_data' from one source while the other succeeds is still 0.
-    return _exit_code(post_output, sheet_output)
-
-
-def _exit_code(*outputs: ScrapeOutput) -> int:
-    statuses = {o.run.status for o in outputs}
-    if "success" in statuses:
         return 0
-    if "partial" in statuses:
-        return 0
-    if "no_data" in statuses:
-        return 1
-    return 2
+
+    log.info("pipeline: nothing to do (pass --write-db or --write-json)")
+    return 0
 
 
 def _maybe_load_dotenv() -> None:
