@@ -246,13 +246,21 @@ def compute_predictions(
         cycle_score = min(len(intervals) / 8.0, 1.0)
         dispersion_score = 1.0 - min(stddev_w / max(mean_w, 1.0), 1.0)
         confidence = round(0.5 * cycle_score + 0.5 * dispersion_score, 2)
+        tier = _confidence_tier(confidence)
+        # Honesty gate ("warming up"): fewer than 3 observed cycles isn't enough
+        # evidence for a medium/high claim no matter what the score says — cap at
+        # low until the cycle history is real. With ~7 weeks of data this keeps
+        # every prediction honestly low-confidence; medium/high emerge only once
+        # products have ≥3 real cycles.
+        if len(intervals) < 3 and tier != "low":
+            tier = "low"
         predictions.append(Prediction(
             retailer=retailer,
             product_name=name,
             predicted_window_start=win_start,
             predicted_window_end=win_end,
             confidence=confidence,
-            confidence_tier=_confidence_tier(confidence),
+            confidence_tier=tier,
             method="statistical",
             mean_interval_weeks=round(mean_w, 2),
             stddev_weeks=round(stddev_w, 2),
