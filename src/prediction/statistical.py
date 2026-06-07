@@ -47,6 +47,16 @@ DEFAULT_MIN_CYCLES = 1
 # doesn't produce a 6-month "could be anywhere" range that's useless.
 MAX_WINDOW_HALFWIDTH_WEEKS = 4
 
+# Floor on prediction window half-width. Even a perfectly-regular cycler (stddev
+# ~0 over many cycles) can't be predicted to the exact day — promo timing drifts.
+# Without this, such products produce a single-day window, which reads as
+# false precision. ±1 week is an honest minimum.
+MIN_WINDOW_HALFWIDTH_WEEKS = 1.0
+
+# Cap on the displayed confidence. A prediction is never a certainty, so we never
+# claim 100% even when the cycle has been perfectly regular for many cycles.
+MAX_CONFIDENCE = 0.95
+
 # Floor on stddev when n=1 (no dispersion observable yet). Gives the window
 # some honest fuzz instead of pretending we know the date exactly.
 STDDEV_FLOOR_WEEKS_N1 = 1.5
@@ -190,7 +200,7 @@ def _predict_for_product(
             stddev_w = max(stddev_w, STDDEV_FLOOR_WEEKS_LOW_N)
     else:
         stddev_w = STDDEV_FLOOR_WEEKS_N1
-    half_width = min(stddev_w, MAX_WINDOW_HALFWIDTH_WEEKS)
+    half_width = max(MIN_WINDOW_HALFWIDTH_WEEKS, min(stddev_w, MAX_WINDOW_HALFWIDTH_WEEKS))
     next_sale = last_sale + timedelta(weeks=mean_w)
     win_start = next_sale - timedelta(weeks=half_width)
     win_end = next_sale + timedelta(weeks=half_width)
@@ -245,7 +255,7 @@ def compute_predictions(
         # Confidence: more cycles = better, less dispersion = better.
         cycle_score = min(len(intervals) / 8.0, 1.0)
         dispersion_score = 1.0 - min(stddev_w / max(mean_w, 1.0), 1.0)
-        confidence = round(0.5 * cycle_score + 0.5 * dispersion_score, 2)
+        confidence = round(min(MAX_CONFIDENCE, 0.5 * cycle_score + 0.5 * dispersion_score), 2)
         tier = _confidence_tier(confidence)
         # Honesty gate ("warming up"): fewer than 3 observed cycles isn't enough
         # evidence for a medium/high claim no matter what the score says — cap at

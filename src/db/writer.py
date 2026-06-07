@@ -283,38 +283,38 @@ def write_predictions_to_db(
                 (retailer, name): pid for pid, retailer, name in cur.fetchall()
             }
 
+            # Build the insertable rows (skipping any prediction whose product
+            # isn't in the DB), then write them in multi-row batches — row-by-row
+            # over a high-latency pooler would be minutes for thousands of rows.
+            rows = []
             for p in predictions:
-                key = (p.retailer, p.product_name.strip())
-                product_id = lookup.get(key)
+                product_id = lookup.get((p.retailer, p.product_name.strip()))
                 if product_id is None:
                     skipped_unmatched += 1
                     continue
+                rows.append((
+                    product_id, p.predicted_window_start, p.predicted_window_end,
+                    p.confidence, p.confidence_tier, p.method,
+                    p.mean_interval_weeks, p.stddev_weeks, p.cycle_count, p.computed_at,
+                ))
+
+            batch = 500
+            for i in range(0, len(rows), batch):
+                chunk = rows[i:i + batch]
+                ph = ",".join(["(%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(chunk))
+                flat = [v for r in chunk for v in r]
                 cur.execute(
-                    """
+                    f"""
                     insert into predictions
                         (product_id, predicted_window_start, predicted_window_end,
                          confidence, confidence_tier, method, mean_interval_weeks, stddev_weeks,
                          cycle_count, computed_at)
-                    values (%(product_id)s::uuid, %(ws)s, %(we)s,
-                            %(confidence)s, %(confidence_tier)s, %(method)s, %(mean)s, %(stddev)s,
-                            %(cycle_count)s, %(computed_at)s)
+                    values {ph}
                     on conflict (product_id, computed_at) do nothing
                     """,
-                    {
-                        "product_id": product_id,
-                        "ws": p.predicted_window_start,
-                        "we": p.predicted_window_end,
-                        "confidence": p.confidence,
-                        "confidence_tier": p.confidence_tier,
-                        "method": p.method,
-                        "mean": p.mean_interval_weeks,
-                        "stddev": p.stddev_weeks,
-                        "cycle_count": p.cycle_count,
-                        "computed_at": p.computed_at,
-                    },
+                    flat,
                 )
-                if cur.rowcount == 1:
-                    inserted += 1
+                inserted += cur.rowcount
         conn.commit()
 
     log.info(
