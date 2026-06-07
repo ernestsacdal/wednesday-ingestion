@@ -25,7 +25,7 @@ from pathlib import Path
 
 import psycopg
 
-from src.db.writer import write_to_db
+from src.db.bulk_writer import bulk_write_to_db
 from src.scrapers.base import configure_logging
 from src.scrapers.woolies_specials import build_woolies_session, scrape
 
@@ -47,7 +47,7 @@ def refresh_woolies(*, db_url: str, log: logging.Logger) -> int:
     # transaction-safe (all-or-nothing); if it raises, we have NOT deleted any
     # StockUp rows yet, so the worst case is stale-but-present data + a clear log.
     try:
-        result = write_to_db(out, db_url=db_url, log=log)
+        result = bulk_write_to_db(out, db_url=db_url, log=log)
     except Exception:
         log.exception("refresh_woolies.write_failed — StockUp Woolies rows left in place "
                       "(no delete attempted); safe to retry")
