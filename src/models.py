@@ -13,7 +13,8 @@ from typing import Literal
 
 Retailer = Literal["coles", "woolworths"]
 ScrapeSource = Literal[
-    "stockup_post", "coles_catalogue", "woolies_catalogue", "stockup_sheet", "user_submission"
+    "stockup_post", "coles_catalogue", "woolies_catalogue", "stockup_sheet",
+    "hotprices", "user_submission"
 ]
 ScrapeStatus = Literal["success", "partial", "failed", "no_data"]
 PredictionMethod = Literal["statistical", "prophet"]
