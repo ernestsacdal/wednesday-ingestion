@@ -34,13 +34,24 @@ def refresh_woolies(*, db_url: str, log: logging.Logger) -> int:
     """Returns the number of authoritative Woolies specials written."""
     out = scrape(build_woolies_session(), log)
     if not out.specials:
-        log.error("refresh_woolies.no_data — keeping existing rows, aborting")
+        # Distinct from a successful "wrote 0 rows": the API returned nothing
+        # (likely an outage), so we deliberately keep last run's rows rather
+        # than wipe Woolies. Surfaced loudly so a multi-week outage is noticed.
+        log.error("refresh_woolies.no_data — Woolies API returned 0 specials; KEEPING existing "
+                  "rows (no write, no delete). If this persists for 2+ weeks, investigate the API.")
         return 0
 
     week_start = out.specials[0].week_start
 
-    # 1. Write authoritative Woolies half-price rows.
-    result = write_to_db(out, db_url=db_url, log=log)
+    # 1. Write authoritative Woolies half-price rows. write_to_db is
+    # transaction-safe (all-or-nothing); if it raises, we have NOT deleted any
+    # StockUp rows yet, so the worst case is stale-but-present data + a clear log.
+    try:
+        result = write_to_db(out, db_url=db_url, log=log)
+    except Exception:
+        log.exception("refresh_woolies.write_failed — StockUp Woolies rows left in place "
+                      "(no delete attempted); safe to retry")
+        raise
 
     # 2. Remove any remaining current-week Woolies specials still from StockUp.
     with psycopg.connect(db_url, connect_timeout=15) as conn:
