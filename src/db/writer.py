@@ -146,8 +146,8 @@ def _upsert_product(cur: psycopg.Cursor, special: WeeklySpecial) -> str:
             (retailer, retailer_sku, name, category, regular_price_cents, image_url,
              image_fetched_at, last_seen)
         values (%(retailer)s, %(sku)s, %(name)s, %(category)s, %(regular_price_cents)s,
-                %(image_url)s,
-                case when %(image_url)s is not null then now() else null end, now())
+                %(image_url)s::text,
+                case when %(image_url)s::text is not null then now() else null end, now())
         on conflict (retailer, retailer_sku) do update
           set name = excluded.name,
               -- Keep any existing category; only fill it from the source when the
