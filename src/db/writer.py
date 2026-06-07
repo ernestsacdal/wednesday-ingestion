@@ -150,7 +150,11 @@ def _upsert_product(cur: psycopg.Cursor, special: WeeklySpecial) -> str:
                 case when %(image_url)s is not null then now() else null end, now())
         on conflict (retailer, retailer_sku) do update
           set name = excluded.name,
-              category = excluded.category,
+              -- Keep any existing category; only fill it from the source when the
+              -- row doesn't already have one. Sources that lack per-product
+              -- categories (e.g. the hotprices dump) pass 'Uncategorised', which
+              -- must not clobber a real category set by an earlier richer source.
+              category = coalesce(products.category, excluded.category),
               regular_price_cents = greatest(products.regular_price_cents, excluded.regular_price_cents),
               -- Keep any existing image; only fill from the source when we have
               -- one and the row doesn't already.
