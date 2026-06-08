@@ -1,0 +1,40 @@
+name: weekly-catalogue
+
+# Loads the FULL product catalogue (both retailers, ~93k products) from the
+# hotprices dumps into `products`, so every product is searchable + watchable —
+# even ones that never go half-price. SEARCH-ONLY: writes only to `products`,
+# never `specials`, so Home / store browse / predictions are untouched.
+#
+# Weekly (the catalogue changes slowly); the daily-ingestion workflow handles
+# the time-sensitive half-price refresh and stays light. Cron is UTC.
+# 03:00 UTC Sunday = ~2pm AEST Sun. Manual trigger also exposed.
+on:
+  schedule:
+    - cron: "0 3 * * 0"  # 03:00 UTC Sunday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  catalogue:
+    name: Ingest full catalogue -> Supabase (search-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Ingest full catalogue (both retailers)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.ingest_catalogue --retailer all --verbose
