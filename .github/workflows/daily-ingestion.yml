@@ -1,0 +1,45 @@
+name: daily-ingestion
+
+# Refreshes both retailers' half-price specials in Supabase once a day:
+#   - Coles:       the public hotprices.org daily dump (a CDN file; refreshes
+#                  ~01:00 UTC / ~11am AEST). We derive half-price from the price
+#                  series and cache it (source='hotprices').
+#   - Woolworths:  the retailer's own authoritative browse API
+#                  (source='woolies_catalogue').
+#
+# Cron is UTC. 02:00 UTC daily = ~noon AEST / ~1pm AEDT — ~1h after the dump
+# refresh, so Coles is always same-day fresh and mid-week additions are caught.
+# Manual trigger also exposed.
+on:
+  schedule:
+    - cron: "0 2 * * *"  # 02:00 UTC daily, just after the hotprices dump refresh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    name: Refresh Coles + Woolies half-price -> Supabase
+    runs-on: ubuntu-latest
+    # Both writes go through the set-based bulk writer (~8s Coles, ~75s Woolies
+    # incl. the API paginate), plus a bounded image mop-up — a couple of minutes
+    # total. Generous buffer for network flakes.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ingestion pipeline (Coles hotprices + Woolies API -> Supabase)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.pipeline --write-db --verbose
