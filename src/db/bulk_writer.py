@@ -154,8 +154,38 @@ def _upsert_specials(cur, specials, ids) -> int:
     return written
 
 
-def bulk_write_to_db(output: ScrapeOutput, *, db_url: str, log: logging.Logger) -> WriteResult:
-    """Set-based equivalent of writer.write_to_db. Same tables, far fewer trips."""
+def _sync_current_week(cur, specials, ids, log) -> int:
+    """Delete this-week specials for the same (week_start, source) that aren't in
+    the set just written — so the current week's list EXACTLY equals the latest
+    authoritative pull. Needed for daily cadence: an item half-price one day but
+    off the list the next would otherwise leave a stale 'half-price' row for the
+    rest of the week. Runs in the same transaction as the write (no empty window).
+    Safe because the current week's rows for a refresh source come only from that
+    refresh (the history backfill writes past weeks only)."""
+    week_start = specials[0].week_start
+    source = specials[0].source
+    kept = list({pid for pid in ids.values()})
+    cur.execute(
+        """
+        delete from specials
+        where week_start = %(w)s and source = %(src)s
+          and not (product_id = any(%(kept)s::uuid[]))
+        """,
+        {"w": week_start, "src": source, "kept": kept},
+    )
+    pruned = cur.rowcount
+    if pruned:
+        log.info("bulk.sync_week pruned_stale=%d week=%s source=%s", pruned, week_start, source)
+    return pruned
+
+
+def bulk_write_to_db(output: ScrapeOutput, *, db_url: str, log: logging.Logger,
+                     sync_week: bool = False) -> WriteResult:
+    """Set-based equivalent of writer.write_to_db. Same tables, far fewer trips.
+
+    sync_week=True makes the current week's specials for this source exactly match
+    the written set (prunes stale rows) — use it for the recurring daily refreshes.
+    """
     specials = _dedup_by_sku(output.specials)
     with psycopg.connect(db_url, connect_timeout=30) as conn:
         with conn.cursor() as cur:
@@ -163,6 +193,8 @@ def bulk_write_to_db(output: ScrapeOutput, *, db_url: str, log: logging.Logger) 
             ids = _upsert_products(cur, specials)
             obs = _insert_observations(cur, specials, ids)
             spec = _upsert_specials(cur, specials, ids)
+            if sync_week and specials:
+                _sync_current_week(cur, specials, ids, log)
         conn.commit()
     log.info(
         "bulk.write.done run_id=%s products=%d observations=%d specials=%d",

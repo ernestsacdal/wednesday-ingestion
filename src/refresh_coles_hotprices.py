@@ -47,7 +47,7 @@ def refresh_coles(*, db_url: str, log: logging.Logger) -> int:
     # transaction-safe (all-or-nothing); if it raises, we have NOT deleted any
     # StockUp rows yet, so worst case is stale-but-present data + a clear log.
     try:
-        result = bulk_write_to_db(out, db_url=db_url, log=log)
+        result = bulk_write_to_db(out, db_url=db_url, log=log, sync_week=True)
     except Exception:
         log.exception("refresh_coles.write_failed — StockUp Coles rows left in place "
                       "(no delete attempted); safe to retry")

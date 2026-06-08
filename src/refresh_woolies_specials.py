@@ -47,7 +47,7 @@ def refresh_woolies(*, db_url: str, log: logging.Logger) -> int:
     # transaction-safe (all-or-nothing); if it raises, we have NOT deleted any
     # StockUp rows yet, so the worst case is stale-but-present data + a clear log.
     try:
-        result = bulk_write_to_db(out, db_url=db_url, log=log)
+        result = bulk_write_to_db(out, db_url=db_url, log=log, sync_week=True)
     except Exception:
         log.exception("refresh_woolies.write_failed — StockUp Woolies rows left in place "
                       "(no delete attempted); safe to retry")
