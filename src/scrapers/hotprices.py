@@ -101,6 +101,21 @@ def _coles_product_url(coles_id: str, name: str) -> str:
     return f"https://www.coles.com.au/product/{slug}-{coles_id}"
 
 
+def build_woolies_image_url(stockcode: str) -> str:
+    """Deterministic Woolworths product-image CDN URL (the dump id IS the stockcode)."""
+    return f"https://cdn0.woolworths.media/content/wowproductimages/large/{stockcode}.jpg"
+
+
+def _image_url(retailer: str, pid: str) -> str:
+    return build_woolies_image_url(pid) if retailer == "woolworths" else build_coles_image_url(pid)
+
+
+def _product_url(retailer: str, pid: str, name: str) -> str:
+    if retailer == "woolworths":
+        return f"https://www.woolworths.com.au/shop/productdetails/{pid}"
+    return _coles_product_url(pid, name)
+
+
 def _cents(price) -> int | None:
     try:
         c = round(float(price) * 100)
@@ -158,7 +173,7 @@ def _regular_cents(hist: list[tuple[date, int]], today: date) -> int:
     return max(pool) if pool else 0
 
 
-def _parse_one(raw: dict, *, today: date) -> ColesProduct | None:
+def _parse_one(raw: dict, *, today: date, retailer: str = "coles") -> ColesProduct | None:
     cid = raw.get("id")
     name = (raw.get("name") or "").strip()
     if cid is None or not name:
@@ -192,8 +207,8 @@ def _parse_one(raw: dict, *, today: date) -> ColesProduct | None:
     return ColesProduct(
         coles_id=cid,
         name=name,
-        image_url=build_coles_image_url(cid),
-        source_product_url=_coles_product_url(cid, name),
+        image_url=_image_url(retailer, cid),
+        source_product_url=_product_url(retailer, cid, name),
         regular_cents=regular,
         current_sale_cents=cur_sale,
         current_discount_pct=cur_pct,
@@ -203,12 +218,12 @@ def _parse_one(raw: dict, *, today: date) -> ColesProduct | None:
 
 
 def parse_products(raw_items: list[dict], *, log: logging.Logger,
-                   today: date | None = None) -> list[ColesProduct]:
+                   today: date | None = None, retailer: str = "coles") -> list[ColesProduct]:
     """Parse every product; keep only those with usable price history."""
     today = today or datetime.now(timezone.utc).date()
     products: list[ColesProduct] = []
     for raw in raw_items:
-        p = _parse_one(raw, today=today)
+        p = _parse_one(raw, today=today, retailer=retailer)
         if p is not None:
             products.append(p)
     half = sum(1 for p in products if p.is_current_half)
