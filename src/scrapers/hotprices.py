@@ -55,6 +55,11 @@ _EVENT_MIN_OFF = 0.48
 # below its recent regular (max) price — a second signal that also catches a
 # current half that followed straight after another promo.
 _CURRENT_MIN_OFF = 0.48
+# A product is "on special" (for the broader Specials view) at this shallower
+# floor. SEPARATE from the half-price floors above: items >=30% but <48% off are
+# emitted tagged is_half_price=False and NEVER feed the predictor (which only
+# reads is_half_price=true rows). Changing this does not affect half-price.
+_SPECIAL_MIN_OFF = 0.30
 # Window (days) for estimating the "regular" (ticket) price = max price seen.
 _REGULAR_WINDOW_DAYS = 300
 
@@ -169,13 +174,20 @@ def _parse_one(raw: dict, *, today: date) -> ColesProduct | None:
 
     # Currently half-price if the newest change-point is itself a half-price drop,
     # OR the current price is >=~half below the recent regular (catches a current
-    # promo that followed straight on from another).
+    # promo that followed straight on from another). UNCHANGED — this is the flag
+    # the predictor + half-price set depend on.
     is_half = bool(events) and events[0].on_date == hist[0][0]
     if not is_half and regular > 0 and (1 - current / regular) >= _CURRENT_MIN_OFF:
         is_half = True
 
-    cur_sale = current if is_half else None
-    cur_pct = round(100 * (1 - current / regular)) if (is_half and regular > 0) else None
+    # Current discount depth, populated whenever the item is "on special" at the
+    # broader 30% floor — independent of is_half, so scrape() can also emit
+    # sub-half (30-47%) rows. The is_half_price flag is decided in scrape() from
+    # is_current_half + this pct, preserving the exact half-price set.
+    off = (1 - current / regular) if regular > 0 else 0.0
+    on_special = off >= _SPECIAL_MIN_OFF
+    cur_sale = current if on_special else None
+    cur_pct = round(100 * off) if on_special else None
 
     return ColesProduct(
         coles_id=cid,
@@ -232,14 +244,13 @@ def scrape(log: logging.Logger, *, today: date | None = None) -> ScrapeOutput:
 
     specials: list[WeeklySpecial] = []
     for p in products:
-        if not p.is_current_half or p.current_sale_cents is None:
+        # Emit anything "on special" (>=30% off). Half-price — flagged
+        # current-half AND >=48% off — lands is_half_price=True (byte-identical
+        # to the old half-only behaviour). 30-47% lands is_half_price=False for
+        # the Specials view and is invisible to the predictor.
+        if p.current_sale_cents is None:
             continue
         pct = p.current_discount_pct or 0
-        # Hard half-price floor: never emit a sub-half "special". Guards the
-        # baseline-calc edge case where a recent flat price can make the derived
-        # discount understate (even to ~0) despite the event-path flagging it.
-        if pct < 48:
-            continue
         specials.append(WeeklySpecial(
             retailer="coles",
             product_name=p.name,
@@ -247,7 +258,7 @@ def scrape(log: logging.Logger, *, today: date | None = None) -> ScrapeOutput:
             regular_price_cents=p.regular_cents,
             sale_price_cents=p.current_sale_cents,
             discount_pct=pct,
-            is_half_price=pct >= 48,
+            is_half_price=(p.is_current_half and pct >= 48),
             last_halfprice_raw="",
             last_halfprice_weeks_ago=None,
             last_halfprice_retailer=None,
@@ -259,9 +270,11 @@ def scrape(log: logging.Logger, *, today: date | None = None) -> ScrapeOutput:
             image_url=p.image_url,
         ))
 
+    half = sum(1 for s in specials if s.is_half_price)
     run.finalise(status="success" if specials else "no_data", items=len(specials))
-    run.notes = f"currently_half={len(specials)} week_start={week_start}"
-    log.info("hotprices.scrape_done specials=%d week_start=%s", len(specials), week_start)
+    run.notes = f"specials={len(specials)} half={half} week_start={week_start}"
+    log.info("hotprices.scrape_done specials=%d half=%d week_start=%s",
+             len(specials), half, week_start)
     return ScrapeOutput(run=run, specials=specials)
 
 
