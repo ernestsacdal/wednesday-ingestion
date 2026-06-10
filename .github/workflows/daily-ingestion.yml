@@ -38,8 +38,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run ingestion pipeline (Coles hotprices + Woolies API -> Supabase)
+      - name: Run ingestion pipeline (Coles hotprices + Woolies API -> Supabase + alerts)
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           PYTHONIOENCODING: utf-8
-        run: python -m src.pipeline --write-db --verbose
+        # --send-alerts: weekly watchlist digest right after the data lands
+        # (~12:15pm AEST). Once-per-week per device via the DB dedup; the
+        # sender's week gate keeps stale-week days as no-ops.
+        run: python -m src.pipeline --write-db --send-alerts --verbose

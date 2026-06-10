@@ -52,6 +52,12 @@ def main(argv: list[str] | None = None) -> int:
              "(Session Pooler URI). Loads .env from the project root if present.",
     )
     parser.add_argument(
+        "--send-alerts",
+        action="store_true",
+        help="After the refreshes, send the weekly watchlist digest pushes "
+             "(see src/send_alerts.py). Default OFF so local runs never push.",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Enable DEBUG-level logging.",
@@ -99,6 +105,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         except Exception as e:  # noqa: BLE001 - image fill failure must NOT fail the cron
             log.exception("pipeline.images_failed err=%s", e)
+
+        # Weekly watchlist digest (Phase 4). Runs daily; the DB unique on
+        # (device, week, alert_type) makes it once-per-week per device, so a
+        # failed Wednesday self-heals and mid-week opt-ins still get theirs.
+        # The sender's own week gate skips when specials are on a stale week.
+        if args.send_alerts:
+            try:
+                from src.send_alerts import run_alerts
+                stats = run_alerts(db_url, log=log)
+                log.info(
+                    "pipeline.alerts eligible=%d sent=%d errored=%d gc=%d receipts=%d stale=%s",
+                    stats.eligible, stats.sent, stats.errored,
+                    stats.gc_deleted, stats.receipts_checked, stats.skipped_stale_week,
+                )
+            except Exception as e:  # noqa: BLE001 - must NOT fail the cron
+                log.exception("pipeline.alerts_failed err=%s", e)
 
         log.info("pipeline.done")
         return 0

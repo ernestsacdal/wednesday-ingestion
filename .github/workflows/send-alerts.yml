@@ -1,0 +1,51 @@
+name: send-alerts
+
+# Manual trigger for the weekly watchlist digest sender (Phase 4) — used for
+# acceptance testing + ad-hoc ops. The scheduled path is the daily-ingestion
+# workflow's --send-alerts step; this exists so a send (or a dry run) can be
+# fired from the Actions tab without waiting for the cron.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (print, no sends/writes)"
+        type: boolean
+        default: true
+      device_id:
+        description: "Limit to one device_id (optional)"
+        type: string
+        default: ""
+      force:
+        description: "Bypass the current-week gate"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  send:
+    name: Send watchlist digest pushes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sender
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: >-
+          python -m src.send_alerts --verbose
+          ${{ inputs.dry_run && '--dry-run' || '' }}
+          ${{ inputs.force && '--force' || '' }}
+          ${{ inputs.device_id != '' && format('--device {0}', inputs.device_id) || '' }}
