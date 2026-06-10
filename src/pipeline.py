@@ -83,11 +83,17 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as e:  # noqa: BLE001 - must NOT fail the cron
             log.exception("pipeline.coles_refresh_failed err=%s", e)
 
-        # Woolworths: authoritative half-price from the retailer's own API.
+        # Woolworths: live API first, then the hotprices Woolies dump as a
+        # fallback (the live API is blocked from datacenter IPs, so the CI cron
+        # would otherwise silently lose Woolies — which it did once).
         try:
             from src.refresh_woolies_specials import refresh_woolies
             woolies_written = refresh_woolies(db_url=db_url, log=log)
-            log.info("pipeline.woolies_refreshed written=%d", woolies_written)
+            if woolies_written == 0:
+                log.error("pipeline.woolies_all_sources_failed — live API AND hotprices dump both "
+                          "returned 0 Woolies specials; last week's rows kept. Investigate if persistent.")
+            else:
+                log.info("pipeline.woolies_refreshed written=%d", woolies_written)
         except Exception as e:  # noqa: BLE001 - must NOT fail the cron
             log.exception("pipeline.woolies_refresh_failed err=%s", e)
 

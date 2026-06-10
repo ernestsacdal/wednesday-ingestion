@@ -237,12 +237,17 @@ def _most_recent_wednesday(today: date) -> date:
     return today - timedelta(days=(today.weekday() - 2) % 7)
 
 
-def scrape(log: logging.Logger, *, today: date | None = None) -> ScrapeOutput:
-    """This week's authoritative Coles half-price specials, derived from the dump."""
+def scrape(log: logging.Logger, *, today: date | None = None,
+           retailer: str = "coles") -> ScrapeOutput:
+    """This week's authoritative half-price specials for a retailer, from its dump.
+
+    Coles is the primary use (Woolies normally comes from its live API); the
+    Woolies path here is the CI fallback when that API is blocked (datacenter IPs).
+    """
     run = ScrapeRun(
         source="hotprices",
         started_at=datetime.now(timezone.utc),
-        source_url=HOTPRICES_URLS["coles"],
+        source_url=HOTPRICES_URLS[retailer],
     )
     today = today or datetime.now(timezone.utc).date()
     week_start = _most_recent_wednesday(today)
@@ -250,10 +255,10 @@ def scrape(log: logging.Logger, *, today: date | None = None) -> ScrapeOutput:
     scraped_at = datetime.now(timezone.utc)
 
     try:
-        raw = fetch_dump("coles", log=log)
-        products = parse_products(raw, log=log, today=today)
+        raw = fetch_dump(retailer, log=log)
+        products = parse_products(raw, log=log, today=today, retailer=retailer)
     except Exception as e:  # noqa: BLE001
-        log.exception("hotprices.scrape_error")
+        log.exception("hotprices.scrape_error retailer=%s", retailer)
         run.finalise(status="failed", items=0, error=str(e))
         return ScrapeOutput(run=run)
 
@@ -267,7 +272,7 @@ def scrape(log: logging.Logger, *, today: date | None = None) -> ScrapeOutput:
             continue
         pct = p.current_discount_pct or 0
         specials.append(WeeklySpecial(
-            retailer="coles",
+            retailer=retailer,
             product_name=p.name,
             category="Uncategorised",
             regular_price_cents=p.regular_cents,
@@ -280,9 +285,10 @@ def scrape(log: logging.Logger, *, today: date | None = None) -> ScrapeOutput:
             week_start=week_start,
             week_end=week_end,
             source="hotprices",
-            source_url=p.source_product_url or HOTPRICES_URLS["coles"],
+            source_url=p.source_product_url or HOTPRICES_URLS[retailer],
             scraped_at=scraped_at,
             image_url=p.image_url,
+            retailer_sku=f"{retailer}:{p.coles_id}",
         ))
 
     half = sum(1 for s in specials if s.is_half_price)
