@@ -32,6 +32,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.env import load_dotenv
 from src.scrapers.base import configure_logging
 
 
@@ -68,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("pipeline.start", extra={"verbose": args.verbose})
 
     if args.write_db:
-        _maybe_load_dotenv()
+        load_dotenv()
         db_url = os.environ.get("SUPABASE_DB_URL")
         if not db_url:
             log.error("--write-db requested but SUPABASE_DB_URL is not set.")
@@ -152,24 +153,6 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("pipeline: nothing to do (pass --write-db or --write-json)")
     return 0
-
-
-def _maybe_load_dotenv() -> None:
-    """Lightweight .env loader. No python-dotenv dependency."""
-    candidates = [Path.cwd() / ".env", Path(__file__).resolve().parent.parent / ".env"]
-    for env_path in candidates:
-        if not env_path.is_file():
-            continue
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-        break
 
 
 if __name__ == "__main__":

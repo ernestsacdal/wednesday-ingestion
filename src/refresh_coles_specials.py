@@ -1,5 +1,10 @@
 """Trickle-scrape the full Coles half-price list, then replace StockUp Coles.
 
+DEPRECATED (2026-06-07): Coles now comes from the public hotprices.org dump
+(src/refresh_coles_hotprices.py) — accurate, free, and no Cloudflare fight. This
+fragile self-scrape is retired from the hot path and kept only as an emergency
+fallback. Do not wire it back into the pipeline without a clear reason.
+
 Coles rate-limits the website to ~3-5 requests before a long (>7 min) cooldown,
 and its BFF is Imperva-walled — so unlike Woolworths there's no fast/clean pull.
 This collects the full ~1,130-item half-price list the only way that works:

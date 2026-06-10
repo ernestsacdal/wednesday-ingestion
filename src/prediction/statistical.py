@@ -321,28 +321,10 @@ def _resolve_input_path(pattern: str) -> Path:
     return p
 
 
-def _maybe_load_dotenv() -> None:
-    """Load .env from cwd or repo root so SUPABASE_DB_URL is picked up."""
-    import os
-    from pathlib import Path
-    candidates = [Path.cwd() / ".env", Path(__file__).resolve().parent.parent.parent / ".env"]
-    for env_path in candidates:
-        if not env_path.is_file():
-            continue
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-        break
-
-
 def main(argv: list[str] | None = None) -> int:
     import os
+
+    from src.env import load_dotenv
     parser = argparse.ArgumentParser(
         prog="wednesday-prediction-statistical",
         description="Statistical cycle predictor (v1). Reads scraper JSON OR live Supabase, emits predictions JSON OR writes to predictions table.",
@@ -361,7 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     log = configure_logging(verbose=args.verbose)
 
     if args.from_db or args.write_db:
-        _maybe_load_dotenv()
+        load_dotenv()
     db_url = os.environ.get("SUPABASE_DB_URL") if (args.from_db or args.write_db) else None
     if (args.from_db or args.write_db) and not db_url:
         log.error("SUPABASE_DB_URL not set; required for --from-db / --write-db")

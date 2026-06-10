@@ -25,10 +25,10 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import psycopg
 
+from src.env import load_dotenv
 from src.scrapers.base import configure_logging
 from src.scrapers.hotprices import (
     HOTPRICES_URLS, _most_recent_wednesday, fetch_dump, parse_products,
@@ -174,21 +174,6 @@ def backfill(*, retailer: str, db_url: str, log: logging.Logger) -> dict[str, in
     return stats
 
 
-def _load_dotenv() -> None:
-    for env_path in (Path.cwd() / ".env", Path(__file__).resolve().parent.parent / ".env"):
-        if not env_path.is_file():
-            continue
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            k = k.strip(); v = v.strip().strip('"').strip("'")
-            if k and k not in os.environ:
-                os.environ[k] = v
-        break
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="backfill_history")
     parser.add_argument("--retailer", choices=sorted(HOTPRICES_URLS), default="coles",
@@ -198,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     log = configure_logging(verbose=args.verbose)
 
     if not os.environ.get("SUPABASE_DB_URL"):
-        _load_dotenv()
+        load_dotenv()
     db_url = os.environ.get("SUPABASE_DB_URL")
     if not db_url:
         log.error("SUPABASE_DB_URL not set (env or .env file)")
