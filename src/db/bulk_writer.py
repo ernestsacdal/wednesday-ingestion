@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import psycopg
 
-from src.db.writer import WriteResult, _synthetic_sku
+from src.db.writer import WriteResult, product_sku
 from src.models import ScrapeOutput, WeeklySpecial
 
 _PRODUCT_BATCH = 500
@@ -30,11 +30,11 @@ def _chunks(seq, n):
 
 
 def _dedup_by_sku(specials: list[WeeklySpecial]) -> list[WeeklySpecial]:
-    """Last-wins dedup on (retailer, synthetic_sku) so a multi-row upsert never
+    """Last-wins dedup on (retailer, product_sku) so a multi-row upsert never
     tries to affect the same conflict target twice (Postgres rejects that)."""
     by_key: dict[tuple[str, str], WeeklySpecial] = {}
     for s in specials:
-        by_key[(s.retailer, _synthetic_sku(s.retailer, s.product_name))] = s
+        by_key[(s.retailer, product_sku(s))] = s
     return list(by_key.values())
 
 
@@ -65,7 +65,7 @@ def _upsert_products(cur: psycopg.Cursor, specials: list[WeeklySpecial]) -> dict
     for batch in _chunks(specials, _PRODUCT_BATCH):
         rows = []
         for s in batch:
-            sku = _synthetic_sku(s.retailer, s.product_name)
+            sku = product_sku(s)
             img_at = now if s.image_url else None
             rows.append((s.retailer, sku, s.product_name, s.category,
                          s.regular_price_cents, s.image_url, img_at, now))
@@ -99,7 +99,7 @@ def _insert_observations(cur, specials, ids) -> int:
     written = 0
     rows = []
     for s in specials:
-        pid = ids.get((s.retailer, _synthetic_sku(s.retailer, s.product_name)))
+        pid = ids.get((s.retailer, product_sku(s)))
         if pid is None:
             continue
         rows.append((pid, s.sale_price_cents, True, s.discount_pct, s.week_start, s.source))
@@ -126,7 +126,7 @@ def _upsert_specials(cur, specials, ids) -> int:
     written = 0
     rows = []
     for s in specials:
-        pid = ids.get((s.retailer, _synthetic_sku(s.retailer, s.product_name)))
+        pid = ids.get((s.retailer, product_sku(s)))
         if pid is None:
             continue
         rows.append((pid, s.week_start, s.week_end, s.regular_price_cents,

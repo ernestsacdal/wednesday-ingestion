@@ -102,6 +102,7 @@ def _to_special(
     image_url = (
         p.get("LargeImageFile") or p.get("MediumImageFile") or p.get("SmallImageFile") or None
     )
+    stockcode = p.get("Stockcode")
     return WeeklySpecial(
         retailer="woolworths",
         product_name=name,
@@ -119,6 +120,9 @@ def _to_special(
         source_url=f"https://www.woolworths.com.au{_HALF_PRICE_URL}",
         scraped_at=scraped_at,
         image_url=image_url,
+        # Real Woolies key (matches the hotprices Woolies dump id = stockcode),
+        # so the live-API and dump-fallback paths upsert the same product row.
+        retailer_sku=f"woolworths:{stockcode}" if stockcode is not None else None,
     )
 
 

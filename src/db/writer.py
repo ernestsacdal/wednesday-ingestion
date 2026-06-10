@@ -36,6 +36,17 @@ def _synthetic_sku(retailer: str, name: str) -> str:
     return f"stockup:{normalised}"
 
 
+def product_sku(special: WeeklySpecial) -> str:
+    """Canonical products.retailer_sku for a special.
+
+    Prefers the REAL retailer product key ('coles:<id>' / 'woolworths:<stockcode>')
+    when the source provides one, so two distinct products with the same name stay
+    distinct. Falls back to the synthetic name key only for sources that don't
+    expose a real id (legacy StockUp).
+    """
+    return special.retailer_sku or _synthetic_sku(special.retailer, special.product_name)
+
+
 @dataclass
 class WriteResult:
     scrape_run_id: str
@@ -139,7 +150,7 @@ def _finalise_scrape_run(
 
 
 def _upsert_product(cur: psycopg.Cursor, special: WeeklySpecial) -> str:
-    sku = _synthetic_sku(special.retailer, special.product_name)
+    sku = product_sku(special)
     cur.execute(
         """
         insert into products

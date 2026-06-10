@@ -29,7 +29,6 @@ from pathlib import Path
 
 import psycopg
 
-from src.db.writer import _synthetic_sku
 from src.scrapers.base import configure_logging
 from src.scrapers.hotprices import (
     HOTPRICES_URLS, _most_recent_wednesday, fetch_dump, parse_products,
@@ -47,14 +46,14 @@ def _chunks(seq, n):
 def _upsert_products(cur, products, retailer, log) -> None:
     """Ensure a product row exists for every ever-half product.
 
-    Dedup by synthetic SKU first: distinct products whose names normalise to the
-    same key would otherwise hit the same ON CONFLICT target twice in one
-    multi-row statement (Postgres rejects that). Their events still merge under
-    the shared product_id in the caller (ON CONFLICT on (product_id, week_start)).
+    Keyed on the REAL retailer id ('coles:<id>' / 'woolworths:<stockcode>'), so
+    distinct same-name products stay distinct. Dedup by that key first so the
+    same ON CONFLICT target is never hit twice in one multi-row statement
+    (Postgres rejects that).
     """
     by_sku: dict[str, tuple] = {}
     for p in products:
-        sku = _synthetic_sku(retailer, p.name)
+        sku = f"{retailer}:{p.coles_id}"
         by_sku[sku] = (
             retailer, sku, p.name, "Uncategorised",
             p.regular_cents, p.image_url, p.source_product_url,
@@ -111,7 +110,7 @@ def backfill(*, retailer: str, db_url: str, log: logging.Logger) -> dict[str, in
 
         skipped_no_id = 0
         for p in ever_half:
-            pid = ids.get(_synthetic_sku(retailer, p.name))
+            pid = ids.get(f"{retailer}:{p.coles_id}")
             if pid is None:
                 skipped_no_id += 1
                 continue

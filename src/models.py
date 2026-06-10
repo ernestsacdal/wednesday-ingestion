@@ -48,6 +48,10 @@ class WeeklySpecial:
     # Woolworths browse API returns it). Lets the writer persist images without a
     # separate name-search pass. Defaulted so existing constructors are unaffected.
     image_url: str | None = None
+    # Real retailer product key (e.g. "coles:5103930" / "woolworths:123456").
+    # When present the writers key the product row on this instead of the
+    # synthetic name-based SKU, so distinct same-name products stay distinct.
+    retailer_sku: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)

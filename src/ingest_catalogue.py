@@ -12,7 +12,7 @@ makes search complete (and search ranks half-price first — see migration 0018)
 
 Runs WEEKLY (the catalogue changes slowly); the daily cron handles the
 time-sensitive half-price refresh and stays light. Idempotent — upsert by
-(retailer, synthetic SKU). Requires SUPABASE_DB_URL.
+(retailer, real retailer id). Requires SUPABASE_DB_URL.
 
     python -m src.ingest_catalogue --retailer all --verbose
 """
