@@ -204,6 +204,11 @@ def _cents(price) -> int | None:
     return c if c > 0 else None
 
 
+# A real dump is ~21k (Coles) / ~72k (Woolies) items. Anything below this is a
+# truncated or corrupt file — fail loudly rather than write a near-empty week.
+_MIN_DUMP_ITEMS = 10_000
+
+
 def fetch_dump(retailer: str = "coles", *, log: logging.Logger) -> list[dict]:
     """Download + gunzip + parse the canonical dump for one retailer."""
     url = HOTPRICES_URLS[retailer]
@@ -214,6 +219,11 @@ def fetch_dump(retailer: str = "coles", *, log: logging.Logger) -> list[dict]:
     data = json.loads(gzip.decompress(raw))
     if not isinstance(data, list):
         raise ValueError(f"unexpected dump shape: {type(data).__name__}")
+    if len(data) < _MIN_DUMP_ITEMS:
+        raise ValueError(
+            f"suspiciously small {retailer} dump ({len(data)} items < {_MIN_DUMP_ITEMS}) — "
+            "refusing to treat a truncated file as authoritative"
+        )
     log.info("hotprices.fetched retailer=%s bytes=%d products=%d", retailer, len(raw), len(data))
     return data
 

@@ -64,6 +64,9 @@ def main(argv: list[str] | None = None) -> int:
     for r in retailers:
         total += ingest_retailer(retailer=r, db_url=db_url, log=log)
     log.info("ingest_catalogue.all_done total_products=%d", total)
+    if total == 0:
+        log.error("ingest_catalogue.no_products — nothing ingested; failing the run")
+        return 1
     return 0
 
 

@@ -72,11 +72,19 @@ def refresh_woolies(*, db_url: str, log: logging.Logger,
 
     week_start = out.specials[0].week_start
 
+    # A partial scrape (live API died mid-pagination) is written as upserts
+    # only: pruning against an incomplete set would delete items the scrape
+    # simply didn't reach. Stale extras get cleaned by the next full run.
+    is_partial = out.run.status == "partial"
+    if is_partial:
+        log.warning("refresh_woolies.partial_scrape — writing upserts only, "
+                    "skipping the current-week prune + cross-source sweep")
+
     # 1. Write authoritative Woolies half-price rows. write_to_db is
     # transaction-safe (all-or-nothing); if it raises, we have NOT deleted any
     # StockUp rows yet, so the worst case is stale-but-present data + a clear log.
     try:
-        result = bulk_write_to_db(out, db_url=db_url, log=log, sync_week=True)
+        result = bulk_write_to_db(out, db_url=db_url, log=log, sync_week=not is_partial)
     except Exception:
         log.exception("refresh_woolies.write_failed — StockUp Woolies rows left in place "
                       "(no delete attempted); safe to retry")
@@ -87,22 +95,25 @@ def refresh_woolies(*, db_url: str, log: logging.Logger,
     # transition — the other refresh source's stale rows (sync_week only prunes
     # within one source). Safe because history never writes the current week, so
     # the current week's Woolies list should equal exactly this one pull.
+    # Skipped for partial scrapes (see above).
+    deleted = 0
     written_source = out.specials[0].source
-    with psycopg.connect(db_url, connect_timeout=15) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                delete from specials s
-                using products p
-                where s.product_id = p.id
-                  and p.retailer = 'woolworths'
-                  and s.week_start = %(w)s
-                  and s.source <> %(src)s
-                """,
-                {"w": week_start, "src": written_source},
-            )
-            deleted = cur.rowcount
-        conn.commit()
+    if not is_partial:
+        with psycopg.connect(db_url, connect_timeout=15) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    delete from specials s
+                    using products p
+                    where s.product_id = p.id
+                      and p.retailer = 'woolworths'
+                      and s.week_start = %(w)s
+                      and s.source <> %(src)s
+                    """,
+                    {"w": week_start, "src": written_source},
+                )
+                deleted = cur.rowcount
+            conn.commit()
 
     log.info(
         "refresh_woolies.done written=%d deleted_other_source=%d source=%s week_start=%s",

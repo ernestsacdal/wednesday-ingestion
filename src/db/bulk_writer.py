@@ -201,6 +201,10 @@ def bulk_write_to_db(output: ScrapeOutput, *, db_url: str, log: logging.Logger,
     specials = _dedup_by_sku(output.specials)
     with psycopg.connect(db_url, connect_timeout=30) as conn:
         with conn.cursor() as cur:
+            # Serialize writers: a local run and the GH Actions cron writing
+            # the same week concurrently would interleave upserts with the
+            # other's sync_week prune. The xact lock is released on commit.
+            cur.execute("select pg_advisory_xact_lock(hashtext('wednesday-ingest'))")
             scrape_run_id = _insert_scrape_run(cur, output, len(specials))
             ids = _upsert_products(cur, specials)
             obs = _insert_observations(cur, specials, ids)

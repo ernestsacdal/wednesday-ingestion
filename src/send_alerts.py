@@ -301,6 +301,13 @@ def run_alerts(
             stats.skipped_stale_week = True
             log.info("alerts.skip stale_week expected=%s actual=%s", expected, actual)
             return stats
+        if actual is None:
+            # Empty specials table (--force can reach here). A NULL week_start
+            # would bypass the (device_id, week_start, alert_type) dedup unique
+            # (NULL != NULL), allowing duplicate sends — never proceed.
+            stats.skipped_stale_week = True
+            log.error("alerts.skip no_week — specials table has no weeks; nothing to digest")
+            return stats
         week = actual
 
         digests = _eligible_digests(conn, week, only_device)
