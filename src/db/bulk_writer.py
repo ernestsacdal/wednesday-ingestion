@@ -158,27 +158,36 @@ def _upsert_specials(cur, specials, ids) -> int:
 
 
 def _sync_current_week(cur, specials, ids, log) -> int:
-    """Delete this-week specials for the same (week_start, source) that aren't in
-    the set just written — so the current week's list EXACTLY equals the latest
-    authoritative pull. Needed for daily cadence: an item half-price one day but
-    off the list the next would otherwise leave a stale 'half-price' row for the
-    rest of the week. Runs in the same transaction as the write (no empty window).
-    Safe because the current week's rows for a refresh source come only from that
-    refresh (the history backfill writes past weeks only)."""
+    """Delete this-week specials for the same (week_start, source, RETAILER set)
+    that aren't in the set just written — so the current week's list EXACTLY
+    equals the latest authoritative pull. Needed for daily cadence: an item
+    half-price one day but off the list the next would otherwise leave a stale
+    'half-price' row for the rest of the week. Runs in the same transaction as
+    the write (no empty window).
+
+    The retailer scope is load-bearing: since the Woolies CI fallback, BOTH
+    retailers can write source='hotprices'. Without it, the second retailer's
+    sync wiped the first retailer's freshly written week (Coles went to zero
+    when the Woolies fallback ran after it on 2026-06-11)."""
     week_start = specials[0].week_start
     source = specials[0].source
+    retailers = sorted({s.retailer for s in specials})
     kept = list({pid for pid in ids.values()})
     cur.execute(
         """
-        delete from specials
-        where week_start = %(w)s and source = %(src)s
-          and not (product_id = any(%(kept)s::uuid[]))
+        delete from specials s
+        using products p
+        where s.product_id = p.id
+          and s.week_start = %(w)s and s.source = %(src)s
+          and p.retailer = any(%(retailers)s)
+          and not (s.product_id = any(%(kept)s::uuid[]))
         """,
-        {"w": week_start, "src": source, "kept": kept},
+        {"w": week_start, "src": source, "retailers": retailers, "kept": kept},
     )
     pruned = cur.rowcount
     if pruned:
-        log.info("bulk.sync_week pruned_stale=%d week=%s source=%s", pruned, week_start, source)
+        log.info("bulk.sync_week pruned_stale=%d week=%s source=%s retailers=%s",
+                 pruned, week_start, source, ",".join(retailers))
     return pruned
 
 
