@@ -1,0 +1,185 @@
+"""Post-run data invariants — the loud safety net.
+
+Three incidents in one week (silent Woolies loss, a stale-code cron
+re-creating purged synthetic rows, the fallback prune wiping Coles' current
+week) all ran GREEN in GitHub Actions because nothing inspected the data
+OUTCOME — only whether the scripts crashed. This module asserts invariants
+against the live DB and exits non-zero when any fail, which fails the
+workflow step, which triggers GitHub's built-in failure email. Bad data
+becomes an inbox ping instead of a surprise in the app.
+
+Runs as the final step of both workflows (daily-ingestion, weekly-catalogue)
+and standalone:
+
+    python -m src.verify_data --verbose
+
+Thresholds are deliberately loose floors (roughly a third of typical) so
+normal weekly variance never cries wolf; only real breakage trips them.
+Requires SUPABASE_DB_URL.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+from dataclasses import dataclass
+
+import psycopg
+
+from src.env import load_dotenv
+from src.scrapers.base import configure_logging
+
+
+@dataclass
+class Check:
+    name: str
+    sql: str
+    ok: "callable"  # scalar -> bool
+    expect: str     # human description of the passing condition
+
+
+CHECKS: list[Check] = [
+    # The class of incidents 1 + 3: a retailer's current week silently empty.
+    Check(
+        "coles_current_half",
+        """select count(*) from specials s join products p on p.id = s.product_id
+           where s.week_start = (select max(week_start) from specials)
+             and s.is_half_price and p.retailer = 'coles'""",
+        lambda v: v >= 400, ">= 400 (typical ~1,250)",
+    ),
+    Check(
+        "woolies_current_half",
+        """select count(*) from specials s join products p on p.id = s.product_id
+           where s.week_start = (select max(week_start) from specials)
+             and s.is_half_price and p.retailer = 'woolworths'""",
+        lambda v: v >= 400, ">= 400 (typical ~1,100)",
+    ),
+    # Stale week being served as current.
+    Check(
+        "week_is_current",
+        """select (select max(week_start) from specials)
+                = (current_date - ((extract(dow from current_date)::int - 3 + 7) % 7))::date""",
+        lambda v: v is True, "max(week_start) == most recent Wednesday",
+    ),
+    # The class of incident 2: resurrected synthetic-keyed rows.
+    Check(
+        "no_synthetic_products",
+        "select count(*) from products where retailer_sku like 'stockup:%'",
+        lambda v: v == 0, "== 0",
+    ),
+    # Marketplace junk stays purged (parse-time skip + this backstop).
+    Check(
+        "no_marketplace_products",
+        """select count(*) from products
+           where retailer = 'woolworths'
+             and length(split_part(retailer_sku, ':', 2)) >= 8""",
+        lambda v: v == 0, "== 0",
+    ),
+    # Catalogue wipes.
+    Check(
+        "coles_catalogue_floor",
+        "select count(*) from products where retailer = 'coles'",
+        lambda v: v >= 15_000, ">= 15,000 (typical ~21,300)",
+    ),
+    Check(
+        "woolies_catalogue_floor",
+        "select count(*) from products where retailer = 'woolworths'",
+        lambda v: v >= 12_000, ">= 12,000 (typical ~20,300)",
+    ),
+    # Both retailers actually wrote recently (silent-skip detector). 26h
+    # tolerates cron delay; the weekly workflow may run before a delayed daily.
+    Check(
+        "coles_scraped_recently",
+        """select count(*) from scrape_runs
+           where status in ('success', 'partial') and source = 'hotprices'
+             and run_at > now() - interval '26 hours'""",
+        lambda v: v >= 1, ">= 1 run in 26h",
+    ),
+    Check(
+        "woolies_scraped_recently",
+        """select count(*) from scrape_runs
+           where status in ('success', 'partial')
+             and source in ('woolies_catalogue', 'hotprices')
+             and run_at > now() - interval '26 hours'""",
+        lambda v: v >= 1, ">= 1 run in 26h",
+    ),
+    # Derived data staleness (predictor / backtest / matcher are scheduled
+    # weekly — 9 days flags a skipped week).
+    Check(
+        "predictions_fresh",
+        "select coalesce(extract(epoch from now() - max(computed_at)) / 86400, 999) from predictions",
+        lambda v: v <= 9, "newest <= 9 days old",
+    ),
+    Check(
+        "predictions_floor",
+        "select count(*) from predictions",
+        lambda v: v >= 3_000, ">= 3,000",
+    ),
+    Check(
+        "accuracy_fresh",
+        "select coalesce(extract(epoch from now() - max(computed_at)) / 86400, 999) from accuracy_stats",
+        lambda v: v <= 9, "newest <= 9 days old",
+    ),
+    Check(
+        "counterpart_links_floor",
+        "select count(*) from product_aliases where alias_type = 'counterpart'",
+        lambda v: v >= 3_000, ">= 3,000 (typical ~5,300)",
+    ),
+    # Price sanity on the current week.
+    Check(
+        "no_inverted_prices",
+        """select count(*) from specials
+           where week_start = (select max(week_start) from specials)
+             and sale_price_cents > regular_price_cents""",
+        lambda v: v == 0, "== 0",
+    ),
+    # Category coverage doesn't regress (the source caps us around ~30% uncoded).
+    Check(
+        "uncategorised_share",
+        """select round(100.0 * count(*) filter (where category = 'Uncategorised')
+                  / greatest(count(*), 1)) from products""",
+        lambda v: v <= 40, "<= 40% (typical ~28%)",
+    ),
+]
+
+
+def verify(*, db_url: str, log: logging.Logger) -> int:
+    """Run all checks; return the number of failures."""
+    failures = 0
+    with psycopg.connect(db_url, connect_timeout=30) as conn, conn.cursor() as cur:
+        for check in CHECKS:
+            cur.execute(check.sql)
+            value = cur.fetchone()[0]
+            if check.ok(value):
+                log.info("verify.pass %-26s value=%s", check.name, value)
+            else:
+                failures += 1
+                log.error("verify.FAIL %-26s value=%s expected %s",
+                          check.name, value, check.expect)
+    if failures:
+        log.error("verify.result FAILED checks=%d/%d — data needs attention",
+                  failures, len(CHECKS))
+    else:
+        log.info("verify.result all %d checks passed", len(CHECKS))
+    return failures
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="verify_data")
+    parser.add_argument("--verbose", "-v", action="store_true")
+    args = parser.parse_args(argv)
+    log = configure_logging(verbose=args.verbose)
+
+    if not os.environ.get("SUPABASE_DB_URL"):
+        load_dotenv()
+    db_url = os.environ.get("SUPABASE_DB_URL")
+    if not db_url:
+        log.error("SUPABASE_DB_URL not set (env or .env file)")
+        return 2
+
+    return 1 if verify(db_url=db_url, log=log) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
