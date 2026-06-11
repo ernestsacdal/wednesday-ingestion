@@ -1,9 +1,11 @@
 name: weekly-catalogue
 
-# Loads the FULL product catalogue (both retailers, ~93k products) from the
-# hotprices dumps into `products`, so every product is searchable + watchable —
-# even ones that never go half-price. SEARCH-ONLY: writes only to `products`,
-# never `specials`, so Home / store browse / predictions are untouched.
+# Loads the FULL supermarket catalogue (both retailers, ~41k products after
+# marketplace exclusion) from the hotprices dumps into `products`, so every
+# product is searchable + watchable — even ones that never go half-price. The
+# catalogue step is SEARCH-ONLY (writes only `products`); the follow-up steps
+# refresh the weekly derived data: predictions, the prediction track record
+# (backtest), and cross-store counterpart links — then verify invariants.
 #
 # Weekly (the catalogue changes slowly); the daily-ingestion workflow handles
 # the time-sensitive half-price refresh and stays light. Cron is UTC.
@@ -20,7 +22,9 @@ jobs:
   catalogue:
     name: Ingest full catalogue -> Supabase (search-only)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Catalogue load + predictor + backtest + matcher + verify; each is a few
+    # minutes, the buffer covers pooler latency variance.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -38,3 +42,31 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           PYTHONIOENCODING: utf-8
         run: python -m src.ingest_catalogue --retailer all --verbose
+
+      # Weekly derived-data refresh. Without these, predictions drift into the
+      # past, the track record goes stale, and new products never gain
+      # cross-store links — all silently. Each step fails the run on error.
+      - name: Recompute predictions
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.prediction.statistical --from-db --write-db --min-cycles 1
+
+      - name: Recompute prediction track record (backtest)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.backtest --write-db
+
+      - name: Refresh cross-store counterpart links
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.match_counterparts --write-db
+
+      # Same loud safety net as the daily workflow: bad data goes red + emails.
+      - name: Verify data invariants
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.verify_data --verbose

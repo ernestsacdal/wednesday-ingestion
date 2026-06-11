@@ -46,3 +46,13 @@ jobs:
         # (~12:15pm AEST). Once-per-week per device via the DB dedup; the
         # sender's week gate keeps stale-week days as no-ops.
         run: python -m src.pipeline --write-db --send-alerts --verbose
+
+      # The loud safety net: asserts data invariants (per-retailer current-week
+      # floors, week freshness, no junk rows, derived-data freshness...) and
+      # FAILS the run when any are violated — which triggers GitHub's failure
+      # email. A pipeline that "succeeded" but produced bad data goes red here.
+      - name: Verify data invariants
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.verify_data --verbose
