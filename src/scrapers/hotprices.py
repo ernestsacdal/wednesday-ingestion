@@ -50,6 +50,31 @@ _CATEGORY_LABELS: dict[str, str] = json.loads(
 )
 
 
+# Marketplace / non-grocery exclusion (2026-06-12). ~73% of the Woolies dump
+# is "Everyday Market" third-party marketplace stock (car mats, perfume,
+# $999 pet strollers with fake was-prices) — not supermarket groceries. Two
+# rules, validated against the live dump:
+#   1. Real Woolworths supermarket stockcodes are <= 7 digits; marketplace
+#      ids are 10 digits. The split is perfectly bimodal (nothing at 8-9).
+#   2. A small category denylist for the unambiguous general-merchandise
+#      groups (Everyday Market, Hampers & Gifting, the Home & Lifestyle
+#      group). Garden/hardware/pet codes are NOT denied — real supermarket
+#      items (potting mix, batteries, pet food) live there; rule 1 already
+#      kills the marketplace stock inside them.
+_MARKETPLACE_MIN_ID_LEN = 8
+_NON_GROCERY_CODES = frozenset(
+    {"778", "779", "10104", "10105", "11111"}
+    | {str(c) for c in range(13125, 13144)}  # Home & Lifestyle group
+)
+
+
+def _is_marketplace(raw: dict, retailer: str) -> bool:
+    """True for third-party marketplace / non-grocery dump items to skip."""
+    if retailer == "woolworths" and len(str(raw.get("id") or "")) >= _MARKETPLACE_MIN_ID_LEN:
+        return True
+    return str(raw.get("category")) in _NON_GROCERY_CODES
+
+
 # Conservative name-keyword fallback for the ~30% of dump items that carry
 # no category code (notably most Coles chips/snacks). Rules are ordered —
 # first hit wins — and deliberately narrow: a product that matches nothing
@@ -275,17 +300,25 @@ def _parse_one(raw: dict, *, today: date, retailer: str = "coles") -> ColesProdu
 
 def parse_products(raw_items: list[dict], *, log: logging.Logger,
                    today: date | None = None, retailer: str = "coles") -> list[ColesProduct]:
-    """Parse every product; keep only those with usable price history."""
+    """Parse every product; keep only those with usable price history.
+
+    Marketplace / non-grocery items are dropped here, so nothing downstream
+    (specials, catalogue, history backfill, predictor, matcher) ever sees them.
+    """
     today = today or datetime.now(timezone.utc).date()
     products: list[ColesProduct] = []
+    marketplace = 0
     for raw in raw_items:
+        if _is_marketplace(raw, retailer):
+            marketplace += 1
+            continue
         p = _parse_one(raw, today=today, retailer=retailer)
         if p is not None:
             products.append(p)
     half = sum(1 for p in products if p.is_current_half)
     with_hist = sum(1 for p in products if p.events)
-    log.info("hotprices.parsed products=%d currently_half=%d ever_half=%d",
-             len(products), half, with_hist)
+    log.info("hotprices.parsed products=%d currently_half=%d ever_half=%d marketplace_skipped=%d",
+             len(products), half, with_hist, marketplace)
     return products
 
 
