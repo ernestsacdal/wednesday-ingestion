@@ -55,7 +55,7 @@ def _upsert_products(cur, products, retailer, log) -> None:
     for p in products:
         sku = f"{retailer}:{p.coles_id}"
         by_sku[sku] = (
-            retailer, sku, p.name, "Uncategorised",
+            retailer, sku, p.name, p.category,
             p.regular_cents, p.image_url, p.source_product_url,
         )
     rows = list(by_sku.values())
@@ -70,6 +70,10 @@ def _upsert_products(cur, products, retailer, log) -> None:
                  image_url, source_product_url, image_fetched_at, last_seen)
             values {ph}
             on conflict (retailer, retailer_sku) do update set
+                -- A real category always beats the 'Uncategorised' placeholder.
+                category = case
+                    when excluded.category is not null and excluded.category <> 'Uncategorised'
+                    then excluded.category else products.category end,
                 image_url = coalesce(products.image_url, excluded.image_url),
                 source_product_url = coalesce(products.source_product_url, excluded.source_product_url),
                 image_fetched_at = case

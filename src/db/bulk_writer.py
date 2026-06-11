@@ -79,7 +79,10 @@ def _upsert_products(cur: psycopg.Cursor, specials: list[WeeklySpecial]) -> dict
             values {ph}
             on conflict (retailer, retailer_sku) do update set
                 name = excluded.name,
-                category = coalesce(products.category, excluded.category),
+                -- A real category always beats the 'Uncategorised' placeholder.
+                category = case
+                    when excluded.category is not null and excluded.category <> 'Uncategorised'
+                    then excluded.category else products.category end,
                 regular_price_cents = greatest(products.regular_price_cents, excluded.regular_price_cents),
                 image_url = coalesce(products.image_url, excluded.image_url),
                 image_fetched_at = case

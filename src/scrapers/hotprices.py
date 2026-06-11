@@ -38,8 +38,62 @@ import re
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from src.models import ScrapeOutput, ScrapeRun, WeeklySpecial
+
+# Category code -> human label, vendored from the hotprices-au project's
+# web/site/model/categories.js (the dump carries only the numeric code).
+_CATEGORY_LABELS: dict[str, str] = json.loads(
+    (Path(__file__).resolve().parent.parent / "data" / "hotprices_categories.json")
+    .read_text(encoding="utf-8")
+)
+
+
+# Conservative name-keyword fallback for the ~30% of dump items that carry
+# no category code (notably most Coles chips/snacks). Rules are ordered —
+# first hit wins — and deliberately narrow: a product that matches nothing
+# stays honestly 'Uncategorised' rather than being guessed into a shelf.
+_KEYWORD_RULES: list[tuple[str, tuple[str, ...]]] = [
+    # Frozen first so "frozen chips" never lands in Savoury Snacks.
+    ("Ice Cream & Frozen Desserts", ("ice cream", "gelato", "icy pole", "paddle pop")),
+    ("Frozen", ("frozen",)),
+    ("Savoury Snacks", (
+        "potato chips", "corn chips", "crisps", "popcorn", "pretzel",
+        "doritos", "pringles", "cheezels", "twisties", "burger rings",
+        "grain waves", "rice crackers", "snack mix",
+    )),
+    ("Confectionery", (
+        "chocolate", "lollies", "gummy", "gummi", "licorice", "liquorice",
+        "candy", "marshmallow", "fudge", "chewing gum",
+    )),
+    ("Biscuits & Crackers", ("biscuit", "cookie", "cracker", "wafer")),
+    ("Soft Drinks", ("soft drink", "cola", "lemonade")),
+    ("Energy Drinks", ("energy drink",)),
+    ("Juice", ("juice",)),
+    ("Yogurt", ("yoghurt", "yogurt")),
+    ("Cheese", ("cheese block", "cheese slices", "shredded cheese", "cheese grated")),
+    ("Milk", ("milk 1l", "milk 2l", "milk 3l", "long life milk", "uht milk")),
+    ("Laundry", ("laundry", "fabric softener", "stain remover")),
+    ("Toilet Paper, Tissues & Paper Towels", ("toilet paper", "toilet tissue", "paper towel", "facial tissues")),
+    ("Cleaning Goods", ("dishwash", "disinfectant", "bleach", "toilet cleaner", "multipurpose cleaner", "surface spray")),
+]
+
+
+def _keyword_category(name: str) -> str:
+    lowered = name.lower()
+    for label, needles in _KEYWORD_RULES:
+        if any(n in lowered for n in needles):
+            return label
+    return "Uncategorised"
+
+
+def category_label(code, name: str = "") -> str:
+    """Human category for a dump code, keyword fallback when uncoded."""
+    label = _CATEGORY_LABELS.get(str(code))
+    if label is not None:
+        return label
+    return _keyword_category(name) if name else "Uncategorised"
 
 # Per-retailer canonical dump URLs (CloudFront-hosted, public, daily refresh).
 HOTPRICES_URLS = {
@@ -84,6 +138,7 @@ class ColesProduct:
     current_sale_cents: int | None
     current_discount_pct: int | None
     is_current_half: bool
+    category: str = "Uncategorised"
     events: list[HalfPriceEvent] = field(default_factory=list)
 
 
@@ -213,6 +268,7 @@ def _parse_one(raw: dict, *, today: date, retailer: str = "coles") -> ColesProdu
         current_sale_cents=cur_sale,
         current_discount_pct=cur_pct,
         is_current_half=is_half,
+        category=category_label(raw.get("category"), name),
         events=events,
     )
 
@@ -274,7 +330,7 @@ def scrape(log: logging.Logger, *, today: date | None = None,
         specials.append(WeeklySpecial(
             retailer=retailer,
             product_name=p.name,
-            category="Uncategorised",
+            category=p.category,
             regular_price_cents=p.regular_cents,
             sale_price_cents=p.current_sale_cents,
             discount_pct=pct,
