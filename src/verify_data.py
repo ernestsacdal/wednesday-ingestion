@@ -141,6 +141,20 @@ CHECKS: list[Check] = [
                   / greatest(count(*), 1)) from products""",
         lambda v: v <= 40, "<= 40% (typical ~28%)",
     ),
+    # Half-Price Dinners freshness — TOLERANT: only fails once the feature is
+    # live (any recipe written in the last 8 days). Before the Groq key is
+    # added the table is dormant and this passes vacuously, so it never
+    # spuriously reddens. The generator self-validates its own >=4 floor.
+    Check(
+        "dinners_fresh_when_live",
+        """select case
+                 when (select count(*) from recipes
+                       where generated_at > now() - interval '8 days') = 0 then 99
+                 else (select count(*) from recipes
+                       where week_start = (select max(week_start) from specials))
+               end""",
+        lambda v: v >= 3, ">= 3 this-week dinners when the feature is live (99 = dormant)",
+    ),
 ]
 
 

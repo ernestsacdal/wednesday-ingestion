@@ -64,6 +64,16 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m src.match_counterparts --write-db
 
+      # Half-Price Dinners: one Groq call composing dinners around this week's
+      # half-price heroes. Skips cleanly (exit 0) if GROQ_API_KEY is unset, so
+      # the run stays green until the key is added as a repo secret.
+      - name: Generate half-price dinners
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.generate_recipes --write-db --verbose
+
       # Same loud safety net as the daily workflow: bad data goes red + emails.
       - name: Verify data invariants
         env:
