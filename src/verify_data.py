@@ -173,7 +173,7 @@ CHECKS: list[Check] = [
                  else (select count(*) from recipes
                        where week_start = (select max(week_start) from specials))
                end""",
-        lambda v: v >= 3, ">= 3 this-week dinners when the feature is live (99 = dormant)",
+        lambda v: v >= 2, ">= 2 this-week dinners when the feature is live (99 = dormant)",
     ),
 ]
 

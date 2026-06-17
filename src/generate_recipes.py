@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -42,7 +43,7 @@ from src.scrapers.base import configure_logging
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
-_MIN_LLM_RECIPES = 4
+_MIN_LLM_RECIPES = 2   # publish min 2 dinners
 _MIN_SEED_RECIPES = 2
 
 # Names containing any of these are not dinner ingredients — drop before any
@@ -61,6 +62,26 @@ _JUNK = (
 def _is_junk(name: str) -> bool:
     n = name.lower()
     return any(j in n for j in _JUNK)
+
+
+# Single-serve prepared meals (cup soups/pastas, sachets) + flavour-decoys are
+# never a real cooking INGREDIENT for the pasta/cheese/rice/base/wrap slots —
+# they grab false matches ("Cup A Pasta Macaroni", "Pizza Flavour Beans"). The
+# noodle/soup PRIMARY slots opt out (raw=True) since those products ARE the dish.
+_NOT_INGREDIENT = (
+    "cup a soup", "cup-a-soup", "cup a pasta", "cup-a-pasta", "cup noodle",
+    "cup soup", "cup", "noodle", "ramen", "instant", "suimin", "sachet",
+    "soup", "seasoning", "stock", "flavour", "flavoured", "recipe base",
+    "2 minute", "2-minute", "tempters", "serves", "popper",
+)
+
+
+def _slot_match(name: str, keywords: list[str], raw: bool) -> bool:
+    """Word-boundary keyword match; ingredient slots also reject prepared-meal decoys."""
+    n = name.lower()
+    if not raw and any(x in n for x in _NOT_INGREDIENT):
+        return False
+    return any(re.search(r"\b" + re.escape(k) + r"\b", n) for k in keywords)
 
 
 @dataclass
@@ -85,78 +106,118 @@ class Recipe:
     regular_cost_cents: int = 0
 
 
-# Dinner types built around a half-price hero. `match` = name keywords that
-# identify a hero of this type; `hero_noun` is used in the steps so they read
-# cleanly regardless of the exact product; `staples` is the unpriced line.
+# Dinner types, each composed from 2-3 genuinely-complementary HALF-PRICE items
+# (the user wants a fuller basket, not a single hero). Each `slot` lists the
+# name keywords that fill it from this week's half-price set + a quantity label;
+# the FIRST slot is the dish-definer. seed_recipes emits a dinner only when >=2
+# slots fill (never pads with unrelated items). `staples` is the unpriced line.
+_CHEESE = ["parmesan", "mozzarella", "tasty cheese", "cheese block",
+           "shredded cheese", "grated cheese", "cheddar", "pizza cheese"]
 _DISHES = [
     {
-        "key": "curry", "title": "Easy curry night", "hero_noun": "curry base",
-        "match": ["curry recipe base", "curry base", "butter chicken", "massaman",
-                  "green curry", "red curry", "korma", "tikka", "rogan", "dutch curry"],
-        "staples": ["your choice of protein (chicken, beef or chickpeas)", "steamed rice"],
-        "steps": "1. Brown your protein in a little oil.\n"
-                 "2. Stir through the curry base.\n"
-                 "3. Simmer 10-15 minutes and serve over rice.",
-        "tags": ["curry", "easy"],
-    },
-    {
-        "key": "pasta_base", "title": "Creamy pasta night", "hero_noun": "pasta base",
-        "match": ["pasta & sauce", "spaghetti bowl", "pasta bake", "mac & cheese",
-                  "macc & chees", "pasta and sauce"],
-        "staples": ["a splash of milk", "your choice of protein or vegetables"],
-        "steps": "1. Prepare the pasta base as per the pack.\n"
-                 "2. Stir in cooked chicken, bacon or vegetables.\n"
-                 "3. Serve hot.",
-        "tags": ["pasta", "quick"],
-    },
-    {
-        "key": "pasta_sauce", "title": "Pasta night", "hero_noun": "sauce",
-        "match": ["pasta sauce", "passata", "napoletana", "bolognese sauce",
-                  "arrabbiata", "marinara"],
-        "staples": ["a pack of pasta", "grated cheese"],
+        "title": "Pasta night", "tags": ["pasta", "family"],
+        "slots": [
+            {"match": ["pasta sauce", "passata", "napoletana", "bolognese sauce",
+                       "arrabbiata", "marinara", "tomato & herb"], "label": "1 jar"},
+            {"match": ["spaghetti", "penne", "fusilli", "macaroni", "lasagne",
+                       "rigatoni", "spirals", "pasta 500"], "label": "1 pack"},
+            {"match": _CHEESE, "label": "1 block"},
+        ],
+        "staples": ["olive oil", "onion", "garlic", "(mince optional)"],
         "steps": "1. Cook the pasta and drain.\n"
                  "2. Warm the sauce (add mince or vegetables if you like).\n"
                  "3. Toss through the pasta and top with cheese.",
-        "tags": ["pasta"],
     },
     {
-        "key": "stir_fry", "title": "Stir-fry night", "hero_noun": "sauce",
-        "match": ["stir fry", "stir-fry", "simmer sauce", "cook in sauce",
-                  "hokkien", "pad thai sauce", "satay sauce", "teriyaki sauce"],
-        "staples": ["your choice of protein", "mixed vegetables", "rice or noodles"],
+        "title": "Mexican night", "tags": ["mexican", "family"],
+        "slots": [
+            {"match": ["tortilla", "wrap", "taco shell", "taco kit"], "label": "1 pack"},
+            {"match": ["salsa", "mexican", "burrito", "taco sauce", "enchilada",
+                       "chipotle", "guacamole"], "label": "1 jar"},
+            {"match": _CHEESE, "label": "1 block"},
+        ],
+        "staples": ["beef mince or beans", "lettuce", "tomato"],
+        "steps": "1. Brown the mince (or warm the beans) with the sauce.\n"
+                 "2. Warm the wraps.\n"
+                 "3. Fill with mince, cheese and lettuce.",
+    },
+    {
+        "title": "Curry night", "tags": ["curry", "easy"],
+        "slots": [
+            {"match": ["curry", "butter chicken", "massaman", "korma", "tikka",
+                       "rogan", "simmer sauce", "dahl", "dal makhani"], "label": "1 jar"},
+            {"match": ["rice", "basmati", "jasmine rice", "microwave rice"], "label": "1 pack"},
+            {"match": ["pappadum", "naan", "roti", "paratha"], "label": "1 pack"},
+        ],
+        "staples": ["chicken or chickpeas", "onion"],
+        "steps": "1. Brown your protein, then stir through the curry sauce.\n"
+                 "2. Simmer 10-15 minutes.\n"
+                 "3. Serve with rice and warmed bread.",
+    },
+    {
+        "title": "Stir-fry night", "tags": ["stir-fry", "quick"],
+        "slots": [
+            {"match": ["stir fry", "stir-fry", "pad thai", "satay sauce",
+                       "teriyaki sauce", "honey soy", "oyster sauce", "kecap"], "label": "1 bottle"},
+            {"match": ["hokkien", "udon", "egg noodle", "rice noodle", "basmati", "jasmine rice"],
+             "label": "1 pack", "raw": True},
+        ],
+        "staples": ["your choice of protein", "mixed vegetables"],
         "steps": "1. Stir-fry your protein until golden.\n"
                  "2. Add vegetables and the sauce; toss 4-5 minutes.\n"
-                 "3. Serve over rice or noodles.",
-        "tags": ["stir-fry", "quick"],
+                 "3. Serve over noodles or rice.",
     },
     {
-        "key": "noodle", "title": "Loaded noodles", "hero_noun": "noodles",
-        "match": ["ramen", "noodle soup", "cup noodle", "instant noodle", "laksa", "tom yum"],
+        "title": "Creamy pasta bake", "tags": ["pasta", "bake"],
+        "slots": [
+            {"match": ["pasta & sauce", "pasta and sauce", "pasta bake", "mac & cheese",
+                       "macc & chees", "spaghetti bowl", "carbonara", "alfredo"], "label": "1 pack"},
+            {"match": _CHEESE, "label": "1 block"},
+        ],
+        "staples": ["a splash of milk", "chicken or bacon"],
+        "steps": "1. Prepare the pasta base as per the pack.\n"
+                 "2. Stir in cooked protein and half the cheese.\n"
+                 "3. Top with the rest of the cheese and bake 15 min at 200C.",
+    },
+    {
+        "title": "Pizza night", "tags": ["pizza", "family"],
+        "slots": [
+            {"match": ["pizza base", "pizza", "flatbread", "naan"], "label": "1 pack"},
+            {"match": ["pizza sauce", "pasta sauce", "passata", "tomato paste", "napoletana"], "label": "1 jar"},
+            {"match": _CHEESE, "label": "1 block"},
+        ],
+        "staples": ["your favourite toppings"],
+        "steps": "1. Spread sauce over the bases.\n"
+                 "2. Top with cheese and toppings.\n"
+                 "3. Bake 10-12 min at 220C.",
+    },
+    {
+        "title": "Noodle bowl", "tags": ["noodles", "quick"],
+        "slots": [
+            {"match": ["ramen", "laksa", "tom yum", "hokkien noodle", "udon", "soba", "pad thai"],
+             "label": "2 packs", "raw": True},
+            {"match": ["soy sauce", "kecap", "oyster sauce", "satay sauce", "sesame oil", "chilli oil"], "label": "1 bottle"},
+        ],
         "staples": ["an egg", "a handful of greens"],
-        "steps": "1. Cook the noodles as per the pack.\n"
-                 "2. Top with a soft-boiled egg and some greens.\n"
+        "steps": "1. Cook the noodles.\n"
+                 "2. Stir through the sauce; top with a soft-boiled egg and greens.\n"
                  "3. Serve straight away.",
-        "tags": ["noodles", "quick"],
     },
     {
-        "key": "risotto", "title": "Risotto night", "hero_noun": "risotto",
-        "match": ["risotto"],
-        "staples": ["a knob of butter", "grated parmesan"],
-        "steps": "1. Prepare the risotto as per the pack.\n"
-                 "2. Stir through butter and parmesan at the end.\n"
-                 "3. Rest 2 minutes and serve.",
-        "tags": ["rice"],
-    },
-    {
-        "key": "soup", "title": "Soup & toast", "hero_noun": "soup",
-        "match": ["cup a soup", "soup with", "minestrone", "pumpkin soup", "chicken soup"],
-        "staples": ["crusty bread or toast", "butter"],
-        "steps": "1. Heat the soup as per the pack.\n"
-                 "2. Toast and butter some bread.\n"
+        "title": "Soup & cheesy toast", "tags": ["soup", "light"],
+        "slots": [
+            {"match": ["pumpkin soup", "minestrone", "tomato soup", "chicken soup", "vegetable soup", "soup"],
+             "label": "1 tub", "raw": True},
+            {"match": ["sourdough", "baguette", "ciabatta", "turkish bread", "bread roll", "dinner roll"], "label": "1 loaf"},
+            {"match": _CHEESE, "label": "1 block"},
+        ],
+        "staples": ["butter"],
+        "steps": "1. Heat the soup.\n"
+                 "2. Toast the bread, top with cheese and grill until melted.\n"
                  "3. Serve together.",
-        "tags": ["soup", "light"],
     },
 ]
+_MAX_RECIPES = 6
 
 
 def load_candidates(db_url: str, log: logging.Logger) -> tuple[dict[str, Candidate], str]:
@@ -206,9 +267,9 @@ def _validate_and_cost(recipe: Recipe, cands: dict[str, Candidate], log: logging
         clean.append({"product_id": pid, "label": str(ing.get("label") or "").strip()[:40]})
         est += c.sale_cents
         reg += c.regular_cents
-    # Hero model: at least one resolvable half-price hero.
-    if not clean:
-        log.warning("recipes.reject title=%r no resolved heroes", recipe.title)
+    # Each dinner must carry at least TWO resolvable half-price items.
+    if len(clean) < 2:
+        log.warning("recipes.reject title=%r resolved_half_items=%d (<2)", recipe.title, len(clean))
         return False
     recipe.ingredients = clean
     recipe.estimated_cost_cents = est
@@ -222,25 +283,42 @@ def _validate_and_cost(recipe: Recipe, cands: dict[str, Candidate], log: logging
 # --------------------------------------------------------------------------- #
 
 def seed_recipes(cands: dict[str, Candidate], log: logging.Logger) -> list[Recipe]:
-    items = sorted(cands.values(), key=lambda c: c.sale_cents)  # cheapest hero per dish
+    """Compose dinners from 2-3 complementary half-price items each.
+
+    For each dish template, fill its slots (cheapest unused half-price keyword
+    match per slot; no product reused across dinners) and emit only when >=2
+    slots fill — so every dinner carries 2-3 genuinely-related half-price items,
+    never padded with unrelated junk. Capped at _MAX_RECIPES.
+    """
+    items = sorted(cands.values(), key=lambda c: c.sale_cents)  # cheapest first
     used: set[str] = set()
     out: list[Recipe] = []
     for dish in _DISHES:
-        hero = next(
-            (c for c in items
-             if c.product_id not in used
-             and any(m in c.name.lower() for m in dish["match"])),
-            None,
-        )
-        if hero is None:
+        ingredients: list[dict] = []
+        for slot in dish["slots"]:
+            hero = next(
+                (c for c in items
+                 if c.product_id not in used
+                 and _slot_match(c.name, slot["match"], slot.get("raw", False))),
+                None,
+            )
+            if hero is None:
+                continue
+            used.add(hero.product_id)
+            ingredients.append({"product_id": hero.product_id, "label": slot["label"]})
+        if len(ingredients) < 2:
+            # Can't make a 2+ half-price-item dinner from this dish this week —
+            # release any single pick back and skip (don't pad with junk).
+            for ing in ingredients:
+                used.discard(ing["product_id"])
             continue
-        used.add(hero.product_id)
         out.append(Recipe(
-            title=dish["title"], serves=4,
-            ingredients=[{"product_id": hero.product_id, "label": "1 pack"}],
+            title=dish["title"], serves=4, ingredients=ingredients,
             pantry=dish["staples"], instructions=dish["steps"], tags=dish["tags"],
         ))
-    log.info("recipes.seed composed=%d", len(out))
+        if len(out) >= _MAX_RECIPES:
+            break
+    log.info("recipes.seed composed=%d (2-3 half-price items each)", len(out))
     return out
 
 
@@ -250,7 +328,7 @@ def seed_recipes(cands: dict[str, Candidate], log: logging.Logger) -> list[Recip
 
 def _meal_relevant(cands: dict[str, Candidate]) -> list[Candidate]:
     """Half-price items that read like meal components — the LLM's menu."""
-    hints = [m for d in _DISHES for m in d["match"]] + [
+    hints = [m for d in _DISHES for slot in d["slots"] for m in slot["match"]] + [
         "sauce", "noodle", "pasta", "rice", "curry", "soup", "beans",
         "tomato", "coconut", "stock", "gravy", "wrap", "tortilla", "cheese",
     ]
@@ -263,12 +341,13 @@ def _groq_recipes(menu: list[Candidate], api_key: str, log: logging.Logger) -> l
     listing = [{"id": c.product_id, "name": c.name} for c in menu]
     prompt = (
         "You are a practical Australian home cook. Below are products that are "
-        "HALF-PRICE this week (mostly meal bases, sauces, kits, noodles). Compose "
-        "6 to 8 simple weeknight dinners, each built around ONE or TWO of these "
-        "half-price products (referenced by exact id) as the 'hero'. For the "
-        "everyday staples someone adds (protein, rice, veg, pasta, cheese), DO NOT "
-        "use ids - list them as plain text in 'pantry'. Do NOT invent products or "
-        "ids. Do NOT mention prices. Return STRICT JSON only: "
+        "HALF-PRICE this week (mostly meal bases, sauces, kits, pasta, cheese, "
+        "noodles). Compose 4 to 6 simple weeknight dinners, each built on 2-3 of "
+        "these half-price products (referenced by exact id) that genuinely go "
+        "together (e.g. pasta + pasta sauce + cheese). For the everyday staples "
+        "someone adds (protein, fresh veg, etc.), DO NOT use ids - list them as "
+        "plain text in 'pantry'. Do NOT invent products or ids. Only pair items "
+        "that make a coherent meal. Do NOT mention prices. Return STRICT JSON only: "
         '{"recipes":[{"title":str,"serves":int,'
         '"ingredients":[{"product_id":str,"label":str}],'
         '"pantry":[str],"instructions":str,"tags":[str]}]}. '
@@ -371,7 +450,8 @@ def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool,
         floor = _MIN_LLM_RECIPES
 
     recipes = [r for r in raw if _validate_and_cost(r, cands, log)]
-    log.info("recipes.validated kept=%d of=%d", len(recipes), len(raw))
+    recipes = recipes[:_MAX_RECIPES]   # publish at most 6
+    log.info("recipes.validated kept=%d of=%d (cap %d)", len(recipes), len(raw), _MAX_RECIPES)
     if len(recipes) < floor:
         log.error("recipes.fail validated=%d < floor=%d", len(recipes), floor)
         return 1
