@@ -336,7 +336,14 @@ def write_recipes(db_url: str, week: str, recipes: list[Recipe], log: logging.Lo
 # Orchestration
 # --------------------------------------------------------------------------- #
 
-def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool) -> int:
+def _current_week_recipe_count(db_url: str, week: str) -> int:
+    with psycopg.connect(db_url, connect_timeout=20) as c, c.cursor() as cur:
+        cur.execute("select count(*) from recipes where week_start = %s", (week,))
+        return cur.fetchone()[0]
+
+
+def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool,
+        if_missing: bool = False) -> int:
     api_key = os.environ.get("GROQ_API_KEY")
     if not seed and not api_key:
         log.info("recipes.skip no_key — set GROQ_API_KEY for live generation, or use --seed")
@@ -346,6 +353,15 @@ def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool) -> int:
     if not week or len(cands) < 20:
         log.error("recipes.skip insufficient_candidates count=%d week=%s", len(cands), week or "none")
         return 1
+
+    # --if-missing: the daily cron seeds dinners only when the (rolled-over) week
+    # has none yet, so dinners track the Wednesday week change without clobbering
+    # the richer weekly LLM batch. Promos run a week, so once filled, leave them.
+    if if_missing and write_db:
+        existing = _current_week_recipe_count(db_url, week)
+        if existing > 0:
+            log.info("recipes.skip if_missing — %d recipes already exist for week=%s", existing, week)
+            return 0
 
     if seed:
         raw = seed_recipes(cands, log)
@@ -377,6 +393,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", action="store_true",
                         help="Compose from real on-sale heroes without the LLM.")
     parser.add_argument("--write-db", action="store_true", help="Write recipes to the DB.")
+    parser.add_argument("--if-missing", action="store_true",
+                        help="Skip when the current week already has recipes (daily gap-fill).")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
     log = configure_logging(verbose=args.verbose)
@@ -388,7 +406,8 @@ def main(argv: list[str] | None = None) -> int:
         log.error("SUPABASE_DB_URL not set (env or .env file)")
         return 2
 
-    return run(db_url=db_url, log=log, seed=args.seed, write_db=args.write_db)
+    return run(db_url=db_url, log=log, seed=args.seed, write_db=args.write_db,
+               if_missing=args.if_missing)
 
 
 if __name__ == "__main__":

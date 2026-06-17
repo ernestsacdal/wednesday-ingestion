@@ -47,6 +47,28 @@ jobs:
         # sender's week gate keeps stale-week days as no-ops.
         run: python -m src.pipeline --write-db --send-alerts --verbose
 
+      # Continuous Coles accuracy probe: measure our half-price set against
+      # Coles' own weekly catalogue (SaleFinder, cloud-reachable, explicit
+      # "1/2 PRICE" flag) into accuracy_audit, and correct the few
+      # catalogue-confirmed items the dump derivation missed. Soft-fails (exit 0)
+      # if SaleFinder is unreachable; the verify_data freshness invariant catches
+      # persistent failure.
+      - name: Probe + correct Coles accuracy (SaleFinder)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.audit_accuracy --write-db --correct --verbose
+
+      # Keep Half-Price Dinners current with the Wednesday week rollover. The
+      # promo week rolls daily-cron-time but the richer weekly LLM batch only
+      # runs Sundays, so --if-missing seeds the new week's dinners (free, no
+      # Groq) ONLY when it's empty — never clobbering the weekly LLM output.
+      - name: Seed dinners if the new week has none
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.generate_recipes --seed --write-db --if-missing --verbose
+
       # The loud safety net: asserts data invariants (per-retailer current-week
       # floors, week freshness, no junk rows, derived-data freshness...) and
       # FAILS the run when any are violated — which triggers GitHub's failure

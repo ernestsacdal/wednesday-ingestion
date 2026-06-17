@@ -141,6 +141,26 @@ CHECKS: list[Check] = [
                   / greatest(count(*), 1)) from products""",
         lambda v: v <= 40, "<= 40% (typical ~28%)",
     ),
+    # Coles accuracy vs the SaleFinder catalogue ground truth (src/audit_accuracy).
+    # Recall floor — tolerant: passes (sentinel 100) until the probe first runs.
+    Check(
+        "coles_recall_floor",
+        """select coalesce(
+                 (select recall_pct from accuracy_audit
+                  where retailer = 'coles' and source = 'salefinder_coles'
+                  order by measured_at desc limit 1), 100)""",
+        lambda v: v is None or v >= 70, ">= 70% (catalogue half-price we flag)",
+    ),
+    # Probe freshness — alarms only once it has ever run (dormant returns 0).
+    Check(
+        "coles_audit_fresh",
+        """select case when (select count(*) from accuracy_audit where retailer = 'coles') = 0
+                       then 0
+                       else extract(epoch from now()
+                            - (select max(measured_at) from accuracy_audit where retailer = 'coles')) / 86400
+                  end""",
+        lambda v: v <= 9, "newest <= 9 days (probe still running)",
+    ),
     # Half-Price Dinners freshness — TOLERANT: only fails once the feature is
     # live (any recipe written in the last 8 days). Before the Groq key is
     # added the table is dormant and this passes vacuously, so it never
