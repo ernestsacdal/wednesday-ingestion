@@ -367,17 +367,33 @@ def _groq_recipes(menu: list[Candidate], api_key: str, log: logging.Logger) -> l
         timeout=90,
     )
     resp.raise_for_status()
-    data = json.loads(resp.json()["choices"][0]["message"]["content"])
+    # The model occasionally returns truncated/malformed JSON or an unexpected
+    # shape. Never let that crash the run: log the raw head and return [] so the
+    # caller falls back to the seed path.
+    try:
+        content = resp.json()["choices"][0]["message"]["content"]
+        recipes_raw = json.loads(content).get("recipes", [])
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError) as exc:
+        head = (resp.text or "")[:500]
+        log.error("recipes.groq parse_failed %s — raw=%r", exc, head)
+        return []
     out: list[Recipe] = []
-    for r in data.get("recipes", []):
-        out.append(Recipe(
-            title=str(r.get("title", "")).strip()[:80],
-            serves=int(r.get("serves", 4) or 4),
-            ingredients=list(r.get("ingredients", [])),
-            pantry=[str(p).strip()[:40] for p in (r.get("pantry") or [])][:6],
-            instructions=str(r.get("instructions", "")).strip(),
-            tags=[str(t).strip()[:20] for t in (r.get("tags") or [])][:5],
-        ))
+    for r in recipes_raw:
+        if not isinstance(r, dict):
+            continue
+        try:
+            out.append(Recipe(
+                title=str(r.get("title", "")).strip()[:80],
+                serves=int(r.get("serves", 4) or 4),
+                # ingredients:null and non-dict items both crash _validate_and_cost
+                # downstream — keep only dict entries.
+                ingredients=[i for i in (r.get("ingredients") or []) if isinstance(i, dict)],
+                pantry=[str(p).strip()[:40] for p in (r.get("pantry") or [])][:6],
+                instructions=str(r.get("instructions", "")).strip(),
+                tags=[str(t).strip()[:20] for t in (r.get("tags") or [])][:5],
+            ))
+        except (TypeError, ValueError) as exc:
+            log.warning("recipes.groq skip_malformed_item %s", exc)
     log.info("recipes.groq returned=%d", len(out))
     return out
 
@@ -390,6 +406,9 @@ def write_recipes(db_url: str, week: str, recipes: list[Recipe], log: logging.Lo
     now = datetime.now(timezone.utc)
     with psycopg.connect(db_url, connect_timeout=30) as conn:
         with conn.cursor() as cur:
+            # Bound the wait so a crashed concurrent run can't hang this one
+            # indefinitely (the lock is otherwise held for the whole txn).
+            cur.execute("set local lock_timeout = '30s'")
             cur.execute("select pg_advisory_xact_lock(hashtext('wednesday-ingest'))")
             cur.execute("delete from recipes where week_start = %s", (week,))
             for r in recipes:
@@ -452,6 +471,17 @@ def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool,
     recipes = [r for r in raw if _validate_and_cost(r, cands, log)]
     recipes = recipes[:_MAX_RECIPES]   # publish at most 6
     log.info("recipes.validated kept=%d of=%d (cap %d)", len(recipes), len(raw), _MAX_RECIPES)
+
+    # LLM path under-produced (empty/malformed batch, parse failure, or too few
+    # resolvable heroes) — fall back to the no-LLM seed so the week still gets
+    # dinners instead of failing the cron.
+    if not seed and len(recipes) < floor:
+        log.warning("recipes.llm_under_floor validated=%d < %d — falling back to seed",
+                    len(recipes), floor)
+        raw = seed_recipes(cands, log)
+        recipes = [r for r in raw if _validate_and_cost(r, cands, log)][:_MAX_RECIPES]
+        floor = _MIN_SEED_RECIPES
+
     if len(recipes) < floor:
         log.error("recipes.fail validated=%d < floor=%d", len(recipes), floor)
         return 1
