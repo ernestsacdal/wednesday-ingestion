@@ -76,6 +76,18 @@ CHECKS: list[Check] = [
              and length(split_part(retailer_sku, ':', 2)) >= 8""",
         lambda v: v == 0, "== 0",
     ),
+    # Push tokens live in device_watchlists/device_alerts_log behind RLS with
+    # ZERO anon grants (the Expo push API is unauthenticated — a leaked token is
+    # a spam vector). Any future migration that re-grants anon/authenticated on
+    # these tables trips this and fails the run.
+    Check(
+        "push_tables_anon_locked",
+        """select count(*) from information_schema.role_table_grants
+           where table_schema = 'public'
+             and table_name in ('device_watchlists', 'device_alerts_log')
+             and grantee in ('anon', 'authenticated')""",
+        lambda v: v == 0, "== 0 (push-token tables anon-locked)",
+    ),
     # Catalogue wipes.
     Check(
         "coles_catalogue_floor",
