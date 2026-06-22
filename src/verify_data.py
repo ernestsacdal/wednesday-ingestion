@@ -55,6 +55,23 @@ CHECKS: list[Check] = [
              and s.is_half_price and p.retailer = 'woolworths'""",
         lambda v: v >= 400, ">= 400 (typical ~1,100)",
     ),
+    # Woolies half-price must not silently collapse RELATIVE to Coles. The
+    # absolute floor above catches a total loss; this catches a partial
+    # regression (a precision/recall change that halves the set) on the
+    # dump-fallback path, which — unlike Coles (SaleFinder) — has no
+    # ground-truth probe. Tolerant: normal weeks sit near parity (~0.95).
+    Check(
+        "woolies_coles_half_ratio",
+        """select case when c.n = 0 then 1
+                       else round(w.n::numeric / c.n, 2) end
+           from (select count(*) n from specials s join products p on p.id = s.product_id
+                  where s.week_start = (select max(week_start) from specials)
+                    and s.is_half_price and p.retailer = 'woolworths') w,
+                (select count(*) n from specials s join products p on p.id = s.product_id
+                  where s.week_start = (select max(week_start) from specials)
+                    and s.is_half_price and p.retailer = 'coles') c""",
+        lambda v: v is None or float(v) >= 0.4, ">= 0.4 (Woolies/Coles half-price; ~0.95 typical)",
+    ),
     # Stale week being served as current.
     Check(
         "week_is_current",
