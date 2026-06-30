@@ -179,8 +179,9 @@ def _sweep_receipts(conn: psycopg.Connection, log: logging.Logger, stats: AlertS
 def _gc_orphans(conn: psycopg.Connection, log: logging.Logger, stats: AlertStats) -> None:
     with conn.cursor() as cur:
         cur.execute(
-            "delete from device_watchlists where last_synced_at < now() - interval '%s days'"
-            % _GC_DAYS
+            "delete from device_watchlists "
+            "where last_synced_at < now() - make_interval(days => %s)",
+            (_GC_DAYS,),
         )
         stats.gc_deleted = cur.rowcount
     conn.commit()
