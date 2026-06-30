@@ -71,6 +71,31 @@ def refresh_woolies(*, db_url: str, log: logging.Logger,
         return 0
 
     week_start = out.specials[0].week_start
+    written_source = out.specials[0].source
+
+    # Sticky-live guard: if this run resolved to the hotprices DUMP fallback but
+    # the current week already holds a full LIVE set (source=woolies_catalogue) —
+    # e.g. a residential Scheduled Task on the dev's PC pulled the live Woolies
+    # API that the cloud cron can't reach — KEEP the better live data instead of
+    # overwriting it with the weaker dump. The cloud cron then just leaves Woolies
+    # alone (it still refreshes Coles). A new week resets this naturally: until a
+    # live pull lands, the dump fallback writes as usual.
+    if written_source != "woolies_catalogue":
+        with psycopg.connect(db_url, connect_timeout=15) as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                select count(*) from specials s join products p on p.id = s.product_id
+                 where p.retailer = 'woolworths' and s.week_start = %(w)s
+                   and s.is_half_price and s.source = 'woolies_catalogue'
+                """,
+                {"w": week_start},
+            )
+            live_rows = cur.fetchone()[0]
+        if live_rows >= 400:
+            log.info("refresh_woolies.sticky_live_skip — %d live woolies_catalogue rows already "
+                     "exist for week=%s; keeping them, not overwriting with the dump",
+                     live_rows, week_start)
+            return live_rows
 
     # A partial scrape (live API died mid-pagination) is written as upserts
     # only: pruning against an incomplete set would delete items the scrape
@@ -97,7 +122,6 @@ def refresh_woolies(*, db_url: str, log: logging.Logger,
     # the current week's Woolies list should equal exactly this one pull.
     # Skipped for partial scrapes (see above).
     deleted = 0
-    written_source = out.specials[0].source
     if not is_partial:
         with psycopg.connect(db_url, connect_timeout=15) as conn:
             with conn.cursor() as cur:
