@@ -9,7 +9,13 @@
 # It writes through the same refresh_woolies_specials path the cron uses, so
 # the result is identical to a manual `python -m src.refresh_woolies_specials`.
 
-$ErrorActionPreference = 'Stop'
+# Python's logging writes to STDERR. Under a hidden Scheduled Task,
+# $ErrorActionPreference='Stop' turns that stderr into a terminating error, so
+# the run dies right after the first log line (exit 1). Keep 'Continue' and
+# stop PowerShell from treating native stderr / exit codes as terminating; we
+# read the real exit code from $LASTEXITCODE ourselves.
+$ErrorActionPreference = 'Continue'
+$PSNativeCommandUseErrorActionPreference = $false
 
 $repo = 'C:\Users\sacda\perso\wednesday-ingestion'
 $py   = Join-Path $repo '.venv\Scripts\python.exe'
@@ -20,8 +26,10 @@ New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 $log = Join-Path $logDir ('woolies-refresh-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.log')
 
 Set-Location $repo
-"[$(Get-Date -Format o)] starting woolies live refresh" | Tee-Object -FilePath $log
-& $py -X utf8 -m src.refresh_woolies_specials --verbose *>&1 | Tee-Object -FilePath $log -Append
+# There's no console under a scheduled task, so write straight to the log file
+# (Tee-Object piping native stderr is what broke the scheduled run).
+"[$(Get-Date -Format o)] starting woolies live refresh" | Out-File -FilePath $log -Encoding utf8
+& $py -X utf8 -m src.refresh_woolies_specials --verbose *>&1 | Out-File -FilePath $log -Append -Encoding utf8
 $code = $LASTEXITCODE
-"[$(Get-Date -Format o)] finished exit=$code" | Tee-Object -FilePath $log -Append
+"[$(Get-Date -Format o)] finished exit=$code" | Out-File -FilePath $log -Append -Encoding utf8
 exit $code
