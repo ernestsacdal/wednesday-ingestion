@@ -193,7 +193,7 @@ CHECKS: list[Check] = [
     # Half-Price Dinners freshness — TOLERANT: only fails once the feature is
     # live (any recipe written in the last 8 days). Before the Groq key is
     # added the table is dormant and this passes vacuously, so it never
-    # spuriously reddens. The generator self-validates its own >=4 floor.
+    # spuriously reddens. The generator self-validates its own >=2 floor.
     Check(
         "dinners_fresh_when_live",
         """select case
@@ -203,6 +203,24 @@ CHECKS: list[Check] = [
                        where week_start = (select max(week_start) from specials))
                end""",
         lambda v: v >= 2, ">= 2 this-week dinners when the feature is live (99 = dormant)",
+    ),
+    # Every priced dinner hero must still be half-price THIS week. The daily
+    # --revalidate step repairs weeks whose heroes got pruned (residential
+    # Woolies refresh / SaleFinder corrections remove dump false-positives);
+    # this reddens the run if that repair ever breaks. Vacuous (0) when the
+    # week has no recipes — existence is dinners_fresh_when_live's job.
+    Check(
+        "dinner_heroes_half_price",
+        """select count(*)
+             from recipes r
+             cross join lateral jsonb_array_elements(r.ingredients) ing
+            where r.week_start = (select max(week_start) from specials)
+              and not exists (
+                    select 1 from specials s
+                     where s.week_start = r.week_start
+                       and s.is_half_price
+                       and s.product_id::text = ing->>'product_id')""",
+        lambda v: v == 0, "0 dinner heroes without a current half-price special",
     ),
 ]
 
