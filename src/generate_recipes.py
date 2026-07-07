@@ -40,6 +40,7 @@ import requests
 
 from src.env import load_dotenv
 from src.scrapers.base import configure_logging
+from src.send_alerts import most_recent_wednesday
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -479,7 +480,7 @@ def _product_names(db_url: str, pids: list[str]) -> dict[str, str]:
 
 
 def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool,
-        if_missing: bool = False) -> int:
+        if_missing: bool = False, revalidate: bool = False) -> int:
     api_key = os.environ.get("GROQ_API_KEY")
     if not seed and not api_key:
         log.info("recipes.skip no_key — set GROQ_API_KEY for live generation, or use --seed")
@@ -489,6 +490,31 @@ def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool,
     if not week or len(cands) < 20:
         log.error("recipes.skip insufficient_candidates count=%d week=%s", len(cands), week or "none")
         return 1
+
+    # --revalidate: the daily repair pass. Dinners are composed Wednesday morning,
+    # but later refreshes (the residential Woolworths live pull, SaleFinder
+    # corrections) prune false-positive specials — leaving a recipe pointing at a
+    # hero with no current-week special. Regenerate the week when that happens;
+    # leave it untouched (no churn) when every hero is still half-price.
+    if revalidate:
+        expected = most_recent_wednesday(datetime.now(timezone.utc).date())
+        if str(expected) != week:
+            log.info("recipes.skip stale_week expected=%s actual=%s", expected, week)
+            return 0
+        existing_rows = _load_week_recipes(db_url, week)
+        if not existing_rows:
+            log.info("recipes.revalidate missing_week week=%s", week)
+        else:
+            stale = _stale_heroes(existing_rows, cands)
+            if not stale:
+                log.info("recipes.revalidate ok week=%s recipes=%d", week, len(existing_rows))
+                return 0
+            names = _product_names(db_url, [p for _, pids in stale for p in pids])
+            for title, pids in stale:
+                log.warning("recipes.revalidate stale title=%r missing=%s", title,
+                            ", ".join(names.get(p, str(p)) for p in pids))
+            log.warning("recipes.revalidate regenerating stale=%d of=%d week=%s",
+                        len(stale), len(existing_rows), week)
 
     # --if-missing: the daily cron seeds dinners only when the (rolled-over) week
     # has none yet, so dinners track the Wednesday week change without clobbering
@@ -543,6 +569,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--write-db", action="store_true", help="Write recipes to the DB.")
     parser.add_argument("--if-missing", action="store_true",
                         help="Skip when the current week already has recipes (daily gap-fill).")
+    parser.add_argument("--revalidate", action="store_true",
+                        help="Daily repair: regenerate the week when any dinner hero "
+                             "is no longer half-price; no-op when all heroes hold.")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
     log = configure_logging(verbose=args.verbose)
@@ -555,7 +584,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     return run(db_url=db_url, log=log, seed=args.seed, write_db=args.write_db,
-               if_missing=args.if_missing)
+               if_missing=args.if_missing, revalidate=args.revalidate)
 
 
 if __name__ == "__main__":

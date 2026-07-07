@@ -1,6 +1,8 @@
 """Recipe slotting + validation, plus regression coverage for the Groq-output
-hardening (malformed JSON / null ingredients must never crash the run)."""
+hardening (malformed JSON / null ingredients must never crash the run) and the
+daily --revalidate repair flow."""
 import logging
+from datetime import datetime, timezone
 
 from src.generate_recipes import (
     Candidate,
@@ -149,3 +151,62 @@ class TestGroqHardening:
     def test_non_dict_recipe_skipped(self, monkeypatch):
         out = self._run(monkeypatch, '{"recipes":["just a string", 42]}')
         assert out == []
+
+
+class TestRevalidateFlow:
+    """run(revalidate=True) branches: fresh -> no write, stale/missing -> regenerate,
+    stale specials week -> skip. All DB touchpoints monkeypatched (no network)."""
+
+    WEEK = str(gr.most_recent_wednesday(datetime.now(timezone.utc).date()))
+
+    def _setup(self, monkeypatch, *, week=None, week_rows=None):
+        # 25 candidates clears the <20 floor; two of them power the seed recipes.
+        cands = {f"c{i}": Candidate(f"c{i}", f"Filler {i}", "Pantry", "coles", 400, 200)
+                 for i in range(25)}
+        seeded = [
+            Recipe(title="Pasta night", serves=4,
+                   ingredients=[{"product_id": "c1", "label": "1 jar"},
+                                {"product_id": "c2", "label": "1 pack"}],
+                   pantry=[], instructions="1. Cook.", tags=[]),
+            Recipe(title="Taco night", serves=4,
+                   ingredients=[{"product_id": "c3", "label": "1 kit"},
+                                {"product_id": "c4", "label": "1 jar"}],
+                   pantry=[], instructions="1. Cook.", tags=[]),
+        ]
+        written: list = []
+        monkeypatch.setattr(gr, "load_candidates", lambda db, log: (cands, week or self.WEEK))
+        monkeypatch.setattr(gr, "_load_week_recipes", lambda db, w: week_rows or [])
+        monkeypatch.setattr(gr, "_product_names", lambda db, pids: {})
+        monkeypatch.setattr(gr, "seed_recipes", lambda c, log: list(seeded))
+        monkeypatch.setattr(gr, "write_recipes",
+                            lambda db, w, recipes, log: written.append((w, len(recipes))))
+        return written
+
+    def test_all_fresh_no_write(self, monkeypatch):
+        rows = [_week_recipe("Pasta night", ["c1", "c2"])]
+        written = self._setup(monkeypatch, week_rows=rows)
+        rc = gr.run(db_url="x", log=LOG, seed=True, write_db=True, revalidate=True)
+        assert rc == 0 and written == []
+
+    def test_stale_hero_regenerates(self, monkeypatch):
+        rows = [_week_recipe("Stir-fry night", ["c1", "pruned-id"])]
+        written = self._setup(monkeypatch, week_rows=rows)
+        rc = gr.run(db_url="x", log=LOG, seed=True, write_db=True, revalidate=True)
+        assert rc == 0 and written == [(self.WEEK, 2)]
+
+    def test_missing_week_seeds(self, monkeypatch):
+        written = self._setup(monkeypatch, week_rows=[])
+        rc = gr.run(db_url="x", log=LOG, seed=True, write_db=True, revalidate=True)
+        assert rc == 0 and written == [(self.WEEK, 2)]
+
+    def test_stale_specials_week_skips(self, monkeypatch):
+        written = self._setup(monkeypatch, week="2020-01-01",
+                              week_rows=[_week_recipe("Pasta night", ["gone"])])
+        rc = gr.run(db_url="x", log=LOG, seed=True, write_db=True, revalidate=True)
+        assert rc == 0 and written == []
+
+    def test_dry_revalidate_reports_without_write(self, monkeypatch):
+        rows = [_week_recipe("Stir-fry night", ["pruned-id", "c1"])]
+        written = self._setup(monkeypatch, week_rows=rows)
+        rc = gr.run(db_url="x", log=LOG, seed=True, write_db=False, revalidate=True)
+        assert rc == 0 and written == []
