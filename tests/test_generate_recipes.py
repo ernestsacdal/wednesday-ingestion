@@ -8,6 +8,7 @@ from src.generate_recipes import (
     _groq_recipes,
     _is_junk,
     _slot_match,
+    _stale_heroes,
     _validate_and_cost,
 )
 from src import generate_recipes as gr
@@ -78,6 +79,36 @@ class TestValidateAndCost:
         r = _recipe([{"product_id": "a", "label": "1 jar"},
                      {"product_id": "a", "label": "1 jar"}])
         assert _validate_and_cost(r, _cands(), LOG) is False
+
+
+def _week_recipe(title, pids):
+    return {"id": "r-" + title, "title": title,
+            "ingredients": [{"product_id": p, "label": "1 pack"} for p in pids]}
+
+
+class TestStaleHeroes:
+    """Truth table for the daily revalidation trigger."""
+
+    def test_all_heroes_still_half_price(self):
+        rows = [_week_recipe("Pasta night", ["a", "b"])]
+        assert _stale_heroes(rows, _cands()) == []
+
+    def test_one_pruned_hero_marks_recipe_stale(self):
+        rows = [_week_recipe("Pasta night", ["a", "b"]),
+                _week_recipe("Stir-fry night", ["a", "gone"])]
+        assert _stale_heroes(rows, _cands()) == [("Stir-fry night", ["gone"])]
+
+    def test_empty_ingredients_not_stale(self):
+        # Existence/floor is verify_data's job; no heroes means nothing pruned.
+        assert _stale_heroes([_week_recipe("Odd", [])], _cands()) == []
+
+    def test_no_recipes_no_stale(self):
+        assert _stale_heroes([], _cands()) == []
+
+    def test_missing_product_id_key_is_stale(self):
+        # A malformed stored ingredient should force regeneration, not pass.
+        rows = [{"id": "r", "title": "Broken", "ingredients": [{"label": "1 pack"}]}]
+        assert _stale_heroes(rows, _cands()) == [("Broken", [None])]
 
 
 class _FakeResp:

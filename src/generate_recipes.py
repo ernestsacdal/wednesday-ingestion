@@ -440,6 +440,44 @@ def _current_week_recipe_count(db_url: str, week: str) -> int:
         return cur.fetchone()[0]
 
 
+def _load_week_recipes(db_url: str, week: str) -> list[dict]:
+    """Current-week recipes as [{id, title, ingredients}] (jsonb arrives as a list)."""
+    with psycopg.connect(db_url, connect_timeout=20) as c, c.cursor() as cur:
+        cur.execute(
+            "select id::text, title, ingredients from recipes where week_start = %s",
+            (week,),
+        )
+        return [{"id": r[0], "title": r[1], "ingredients": r[2] or []} for r in cur.fetchall()]
+
+
+def _stale_heroes(recipes: list[dict], cands: dict[str, Candidate]) -> list[tuple[str, list[str]]]:
+    """Recipes carrying a hero that's no longer in the current half-price set.
+
+    Strict ANY-hero rule: a single full-price hero already breaks the
+    half-price promise on the dinner screen (and trips the verify_data
+    invariant), so one missing id marks the week for regeneration. `cands`
+    excludes junk/zero-price rows, so this trigger is strictly MORE sensitive
+    than the invariant — repair can never say ok on a state verify would fail.
+    """
+    stale: list[tuple[str, list[str]]] = []
+    for r in recipes:
+        missing = [ing.get("product_id") for ing in r["ingredients"]
+                   if ing.get("product_id") not in cands]
+        if missing:
+            stale.append((r["title"], missing))
+    return stale
+
+
+def _product_names(db_url: str, pids: list[str]) -> dict[str, str]:
+    """Readable names for pruned heroes (absent from cands, so look them up)."""
+    clean = [p for p in pids if p]
+    if not clean:
+        return {}
+    with psycopg.connect(db_url, connect_timeout=20) as c, c.cursor() as cur:
+        cur.execute("select id::text, name from products where id::text = any(%s)", (clean,))
+        return dict(cur.fetchall())
+
+
 def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool,
         if_missing: bool = False) -> int:
     api_key = os.environ.get("GROQ_API_KEY")
