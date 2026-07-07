@@ -59,15 +59,18 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m src.audit_accuracy --write-db --correct --verbose
 
-      # Keep Half-Price Dinners current with the Wednesday week rollover. The
-      # promo week rolls daily-cron-time but the richer weekly LLM batch only
-      # runs Sundays, so --if-missing seeds the new week's dinners (free, no
-      # Groq) ONLY when it's empty — never clobbering the weekly LLM output.
-      - name: Seed dinners if the new week has none
+      # Keep Half-Price Dinners current AND honest. --revalidate: seeds the new
+      # week when it's empty (week rolls daily-cron-time, the LLM batch only runs
+      # Sundays), and regenerates the week when any dinner hero is no longer
+      # half-price (the residential Woolies live pull + SaleFinder corrections
+      # prune dump false-positives after dinners were composed). Untouched when
+      # every hero holds. A repair deliberately replaces a Sunday LLM batch with
+      # seed dinners — honesty over richness.
+      - name: Seed or repair this week's dinners
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           PYTHONIOENCODING: utf-8
-        run: python -m src.generate_recipes --seed --write-db --if-missing --verbose
+        run: python -m src.generate_recipes --seed --write-db --revalidate --verbose
 
       # The loud safety net: asserts data invariants (per-retailer current-week
       # floors, week freshness, no junk rows, derived-data freshness...) and

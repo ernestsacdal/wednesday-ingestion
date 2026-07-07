@@ -435,12 +435,6 @@ def write_recipes(db_url: str, week: str, recipes: list[Recipe], log: logging.Lo
 # Orchestration
 # --------------------------------------------------------------------------- #
 
-def _current_week_recipe_count(db_url: str, week: str) -> int:
-    with psycopg.connect(db_url, connect_timeout=20) as c, c.cursor() as cur:
-        cur.execute("select count(*) from recipes where week_start = %s", (week,))
-        return cur.fetchone()[0]
-
-
 def _load_week_recipes(db_url: str, week: str) -> list[dict]:
     """Current-week recipes as [{id, title, ingredients}] (jsonb arrives as a list)."""
     with psycopg.connect(db_url, connect_timeout=20) as c, c.cursor() as cur:
@@ -480,7 +474,7 @@ def _product_names(db_url: str, pids: list[str]) -> dict[str, str]:
 
 
 def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool,
-        if_missing: bool = False, revalidate: bool = False) -> int:
+        revalidate: bool = False) -> int:
     api_key = os.environ.get("GROQ_API_KEY")
     if not seed and not api_key:
         log.info("recipes.skip no_key — set GROQ_API_KEY for live generation, or use --seed")
@@ -515,15 +509,6 @@ def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool,
                             ", ".join(names.get(p, str(p)) for p in pids))
             log.warning("recipes.revalidate regenerating stale=%d of=%d week=%s",
                         len(stale), len(existing_rows), week)
-
-    # --if-missing: the daily cron seeds dinners only when the (rolled-over) week
-    # has none yet, so dinners track the Wednesday week change without clobbering
-    # the richer weekly LLM batch. Promos run a week, so once filled, leave them.
-    if if_missing and write_db:
-        existing = _current_week_recipe_count(db_url, week)
-        if existing > 0:
-            log.info("recipes.skip if_missing — %d recipes already exist for week=%s", existing, week)
-            return 0
 
     if seed:
         raw = seed_recipes(cands, log)
@@ -567,8 +552,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", action="store_true",
                         help="Compose from real on-sale heroes without the LLM.")
     parser.add_argument("--write-db", action="store_true", help="Write recipes to the DB.")
-    parser.add_argument("--if-missing", action="store_true",
-                        help="Skip when the current week already has recipes (daily gap-fill).")
     parser.add_argument("--revalidate", action="store_true",
                         help="Daily repair: regenerate the week when any dinner hero "
                              "is no longer half-price; no-op when all heroes hold.")
@@ -584,7 +567,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     return run(db_url=db_url, log=log, seed=args.seed, write_db=args.write_db,
-               if_missing=args.if_missing, revalidate=args.revalidate)
+               revalidate=args.revalidate)
 
 
 if __name__ == "__main__":
