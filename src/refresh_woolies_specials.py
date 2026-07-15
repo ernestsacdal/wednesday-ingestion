@@ -25,13 +25,33 @@ import argparse
 import logging
 import os
 import sys
+from datetime import date, datetime, timezone
 
 import psycopg
 
 from src.db.bulk_writer import bulk_write_to_db
+from src.db.reader import max_week_start
 from src.env import load_dotenv
 from src.scrapers.base import configure_logging
 from src.scrapers.woolies_specials import build_woolies_session, scrape
+from src.send_alerts import most_recent_wednesday
+
+# Deliberate no-op: the run would have CREATED a new promo week with only
+# Woolworths in it (ADR-0001). Distinct from 0 (= both sources empty, a loud
+# failure): main() treats this as success.
+SKIP_WEEK_NOT_ROLLED = -1
+
+
+def _coles_rows_for_week(db_url: str, week: date) -> int:
+    with psycopg.connect(db_url, connect_timeout=15) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            select count(*) from specials s join products p on p.id = s.product_id
+             where p.retailer = 'coles' and s.week_start = %(w)s
+            """,
+            {"w": week},
+        )
+        return cur.fetchone()[0]
 
 
 def _scrape_woolies_dump(log: logging.Logger):
@@ -48,6 +68,23 @@ def refresh_woolies(*, db_url: str, log: logging.Logger,
     dump if the API is blocked/empty (datacenter-IP outage). ``force_fallback``
     skips the live API entirely — used to exercise the dump path in testing.
     """
+    # Solo-roll guard (ADR-0001): a Woolies-only refresh must never be the
+    # FIRST writer of a new promo week — on 2026-07-15 the residential task
+    # rolled the week alone and live App Store users saw "Coles: 0 items" for
+    # hours on drop day. The daily pipeline / midday task roll both retailers
+    # together; until one of them does, keep serving last week complete.
+    # Once a week IS rolled (max == expected) this always passes, so live
+    # Woolies upgrades are never blocked by an already-broken state.
+    expected = most_recent_wednesday(datetime.now(timezone.utc).date())
+    db_max = max_week_start(db_url)
+    if (db_max is None or expected > db_max) and _coles_rows_for_week(db_url, expected) == 0:
+        log.warning(
+            "refresh_woolies.skip week_not_rolled — refusing to create week=%s with no "
+            "Coles rows; the daily pipeline / midday task rolls both retailers together",
+            expected,
+        )
+        return SKIP_WEEK_NOT_ROLLED
+
     out = None
     if not force_fallback:
         try:
@@ -163,7 +200,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     written = refresh_woolies(db_url=db_url, log=log, force_fallback=args.force_fallback)
-    return 0 if written > 0 else 1
+    # Exit map: 0 written = both sources empty (loud failure, exit 1);
+    # SKIP_WEEK_NOT_ROLLED (-1) and positive writes are both success.
+    return 1 if written == 0 else 0
 
 
 if __name__ == "__main__":

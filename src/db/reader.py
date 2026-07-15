@@ -15,6 +15,18 @@ import psycopg
 from src.models import WeeklySpecial
 
 
+def max_week_start(db_url: str) -> date | None:
+    """The newest promo week in specials — what the app treats as "this week".
+
+    Shared by the refresh guards (ADR-0001): a write whose week_start exceeds
+    this value would CREATE a new week, which is only allowed when the week
+    arrives whole (both retailers) and fresh (dump contains the new Wednesday).
+    """
+    with psycopg.connect(db_url, connect_timeout=15) as conn, conn.cursor() as cur:
+        cur.execute("select max(week_start) from specials")
+        return cur.fetchone()[0]
+
+
 def load_specials_from_db(
     db_url: str,
     log: logging.Logger,

@@ -25,9 +25,17 @@ import sys
 import psycopg
 
 from src.db.bulk_writer import bulk_write_to_db
+from src.db.reader import max_week_start
 from src.env import load_dotenv
 from src.scrapers.base import configure_logging
 from src.scrapers.hotprices import scrape
+
+# Creating a NEW week requires this many items whose newest price change is
+# dated on/after the new week_start. A genuine promo-rollover Wednesday dump
+# shows ~1,000-2,500 (2026-07-15's real dump: 1,070 currently-half alone); a
+# dump built BEFORE the rollover shows ~0 — its entries cannot carry the new
+# Wednesday's date. 200 leaves wide margin on both sides.
+_MIN_FRESH_ITEMS_FOR_NEW_WEEK = 200
 
 
 def refresh_coles(*, db_url: str, log: logging.Logger) -> int:
@@ -42,6 +50,19 @@ def refresh_coles(*, db_url: str, log: logging.Logger) -> int:
         return 0
 
     week_start = out.specials[0].week_start
+
+    # New-week freshness gate (ADR-0001): only CREATE a new week when the dump
+    # demonstrably contains it — a stale (pre-Wednesday) dump would mislabel
+    # last week's prices as the new week. Same-week rewrites are never gated.
+    db_max = max_week_start(db_url)
+    fresh = out.run.fresh_week_items or 0
+    if (db_max is None or week_start > db_max) and fresh < _MIN_FRESH_ITEMS_FOR_NEW_WEEK:
+        log.error(
+            "refresh_coles.skip stale_dump_for_new_week fresh_items=%d (<%d) — dump likely "
+            "predates week=%s; KEEPING existing rows (no write, no delete)",
+            fresh, _MIN_FRESH_ITEMS_FOR_NEW_WEEK, week_start,
+        )
+        return 0
 
     # 1. Write authoritative Coles half-price rows. write_to_db is
     # transaction-safe (all-or-nothing); if it raises, we have NOT deleted any
