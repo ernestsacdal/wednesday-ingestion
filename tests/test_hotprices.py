@@ -39,6 +39,40 @@ class TestHistoryPoints:
         assert hp._history_points({}) == []
 
 
+class TestCountItemsChangedOnOrAfter:
+    """Dump-freshness evidence for the new-week creation gate (ADR-0001)."""
+
+    WED = date(2026, 7, 15)
+
+    def _item(self, *dates):
+        return {"priceHistory": [{"date": d, "price": 5.0} for d in dates]}
+
+    def test_counts_items_with_a_change_on_the_new_wednesday(self):
+        raw = [
+            self._item("2026-07-15", "2026-07-01"),   # fresh drop -> counts
+            self._item("2026-07-16"),                  # after cutoff -> counts
+            self._item("2026-07-14", "2026-07-08"),    # stale -> no
+        ]
+        assert hp.count_items_changed_on_or_after(raw, self.WED) == 2
+
+    def test_stale_pre_wednesday_dump_counts_zero(self):
+        raw = [self._item("2026-07-14"), self._item("2026-07-08", "2026-07-01")]
+        assert hp.count_items_changed_on_or_after(raw, self.WED) == 0
+
+    def test_malformed_and_empty_items_skipped(self):
+        raw = [
+            {"priceHistory": [{"date": "bad-date", "price": 5.0}]},
+            {"priceHistory": [{"date": "2026-07-15"}]},  # no price -> malformed
+            {},
+        ]
+        assert hp.count_items_changed_on_or_after(raw, self.WED) == 0
+
+    def test_order_agnostic_newest_detection(self):
+        # Oldest-first history must still register the newest point.
+        raw = [self._item("2026-07-01", "2026-07-15")]
+        assert hp.count_items_changed_on_or_after(raw, self.WED) == 1
+
+
 class TestHalfPriceEvents:
     def test_detects_50pct_drop(self):
         # newest-first: 500 dropped from 1000 = 50% off -> a half-price event.

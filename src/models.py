@@ -77,6 +77,11 @@ class ScrapeRun:
     error: str | None = None
     notes: str | None = None
     source_url: str | None = None
+    # hotprices dumps only: items whose newest price change is dated on/after
+    # the run's week_start. Evidence the dump is fresh for a NEW week — a
+    # Wednesday dump shows ~1,000+, a stale pre-Wednesday dump ~0. Read by
+    # refresh_coles_hotprices' new-week gate; not persisted to scrape_runs.
+    fresh_week_items: int | None = None
 
     def finalise(self, *, status: ScrapeStatus, items: int, error: str | None = None) -> None:
         self.status = status

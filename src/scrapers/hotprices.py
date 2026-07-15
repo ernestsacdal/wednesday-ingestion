@@ -243,6 +243,22 @@ def _history_points(raw: dict) -> list[tuple[date, int]]:
     return out
 
 
+def count_items_changed_on_or_after(raw_items: list[dict], cutoff: date) -> int:
+    """Items whose NEWEST well-formed price change is dated on/after `cutoff`.
+
+    Freshness evidence for a dump: on a genuine promo-rollover Wednesday,
+    ~1,000-2,500 items carry a change point dated that Wednesday; a dump built
+    BEFORE the rollover cannot contain any. Used by the new-week creation gate
+    so a stale dump can never mislabel last week's prices as the new week.
+    """
+    n = 0
+    for raw in raw_items:
+        pts = _history_points(raw)
+        if pts and max(d for d, _c in pts) >= cutoff:
+            n += 1
+    return n
+
+
 def _half_price_events(hist: list[tuple[date, int]]) -> list[HalfPriceEvent]:
     """Detect half-price drops across the change-point series (newest-first)."""
     events: list[HalfPriceEvent] = []
@@ -408,9 +424,10 @@ def scrape(log: logging.Logger, *, today: date | None = None,
 
     half = sum(1 for s in specials if s.is_half_price)
     run.finalise(status="success" if specials else "no_data", items=len(specials))
+    run.fresh_week_items = count_items_changed_on_or_after(raw, week_start)
     run.notes = f"specials={len(specials)} half={half} week_start={week_start}"
-    log.info("hotprices.scrape_done specials=%d half=%d week_start=%s",
-             len(specials), half, week_start)
+    log.info("hotprices.scrape_done specials=%d half=%d week_start=%s fresh_week_items=%d",
+             len(specials), half, week_start, run.fresh_week_items)
     return ScrapeOutput(run=run, specials=specials)
 
 
