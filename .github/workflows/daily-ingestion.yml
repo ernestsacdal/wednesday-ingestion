@@ -7,12 +7,16 @@ name: daily-ingestion
 #   - Woolworths:  the retailer's own authoritative browse API
 #                  (source='woolies_catalogue').
 #
-# Cron is UTC. 02:00 UTC daily = ~noon AEST / ~1pm AEDT — ~1h after the dump
-# refresh, so Coles is always same-day fresh and mid-week additions are caught.
+# Cron is UTC. ~02:17 UTC daily = ~12:17pm AEST / ~1:17pm AEDT — ~1h after the
+# dump refresh, so Coles is always same-day fresh and mid-week additions are
+# caught. Off-the-hour minute: GitHub's scheduler is most congested on :00
+# slots and has been dispatching 2.5-4h late; an odd minute dispatches closer
+# to time. The midday residential task (scripts/refresh-midday.ps1) is the
+# primary week-roller; this run is the backstop (ADR-0001, wednesday repo).
 # Manual trigger also exposed.
 on:
   schedule:
-    - cron: "0 2 * * *"  # 02:00 UTC daily, just after the hotprices dump refresh
+    - cron: "17 2 * * *"  # ~02:17 UTC daily, just after the hotprices dump refresh
   workflow_dispatch:
 
 permissions:
