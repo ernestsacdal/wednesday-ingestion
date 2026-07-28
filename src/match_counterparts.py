@@ -299,7 +299,11 @@ def load_items(db_url: str, log: logging.Logger) -> list[Item]:
     items: list[Item] = []
     with psycopg.connect(db_url, connect_timeout=30) as conn, conn.cursor() as cur:
         cur.execute(
-            "select id::text, retailer, name, regular_price_cents from products",
+            # Skip products that have dropped out of the retailer catalogues
+            # (unseen 60+ days) so a live product never links to a delisted
+            # counterpart carrying a last-known (stale) price.
+            """select id::text, retailer, name, regular_price_cents from products
+                where coalesce(last_seen, first_seen) >= now() - interval '60 days'""",
         )
         for pid, retailer, name, regular in cur.fetchall():
             items.append(_item(pid, retailer, name, regular))
