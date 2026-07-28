@@ -51,6 +51,18 @@ jobs:
         # sender's week gate keeps stale-week days as no-ops.
         run: python -m src.pipeline --write-db --send-alerts --verbose
 
+      # Catalogue prices/names must never freeze: the full-catalogue upsert
+      # overwrites regular_price_cents + name from the freshest dump parse.
+      # Daily (was weekly-only) since the Sunsilk stale-price incident
+      # (2026-07-28): supplier price rises took up to a week — or, before the
+      # upsert fix, forever — to reach products not currently on special.
+      # Bounds non-special price staleness to ~1 day (ADR-0002, wednesday repo).
+      - name: Refresh full catalogue (prices + names)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.ingest_catalogue --retailer all --verbose
+
       # Continuous Coles accuracy probe: measure our half-price set against
       # Coles' own weekly catalogue (SaleFinder, cloud-reachable, explicit
       # "1/2 PRICE" flag) into accuracy_audit, and correct the few
