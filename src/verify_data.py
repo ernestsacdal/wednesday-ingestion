@@ -111,6 +111,16 @@ CHECKS: list[Check] = [
         "select count(*) from products where retailer = 'coles'",
         lambda v: v >= 15_000, ">= 15,000 (typical ~21,300)",
     ),
+    # The daily catalogue refresh actually ran broad. With the upsert now
+    # overwriting price + name (the Sunsilk stale-price fix, 2026-07-28), a
+    # fresh last_seen across the catalogue implies fresh prices; if this
+    # collapses, the catalogue ingest silently stopped and prices are aging.
+    Check(
+        "catalogue_recently_refreshed",
+        """select count(*) from products
+           where last_seen >= now() - interval '2 days'""",
+        lambda v: v >= 40_000, ">= 40,000 seen in 2 days (typical ~45,000)",
+    ),
     Check(
         "woolies_catalogue_floor",
         "select count(*) from products where retailer = 'woolworths'",
