@@ -70,6 +70,15 @@ def _upsert_products(cur, products, retailer, log) -> None:
                  image_url, source_product_url, image_fetched_at, last_seen)
             values {ph}
             on conflict (retailer, retailer_sku) do update set
+                -- The dump is the freshest source for catalogue-only products:
+                -- always take its price + name, or they freeze at first insert
+                -- (the Sunsilk stale-price incident, 2026-07-28 — supplier rises
+                -- never reached rows that weren't currently on special).
+                regular_price_cents = case
+                    when excluded.regular_price_cents > 0
+                    then excluded.regular_price_cents else products.regular_price_cents end,
+                name = case
+                    when excluded.name <> '' then excluded.name else products.name end,
                 -- A real category always beats the 'Uncategorised' placeholder.
                 category = case
                     when excluded.category is not null and excluded.category <> 'Uncategorised'
