@@ -208,6 +208,16 @@ CHECKS: list[Check] = [
     Check(
         "dinners_fresh_when_live",
         """select case
+    # A not-half row at a half-looking discount shows a "1/2 price" badge in the
+    # app. The bulk writer drops these (enforce_badge_invariant); this catches
+    # any other path that writes them.
+    Check(
+        "no_ambiguous_half_badge",
+        """select count(*) from specials
+           where week_start = (select max(week_start) from specials)
+             and not is_half_price and discount_pct >= 48""",
+        lambda v: v == 0, "== 0 not-half rows at >= 48% off this week",
+    ),
                  when (select count(*) from recipes
                        where generated_at > now() - interval '8 days') = 0 then 99
                  else (select count(*) from recipes

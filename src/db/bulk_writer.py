@@ -38,6 +38,20 @@ def _dedup_by_sku(specials: list[WeeklySpecial]) -> list[WeeklySpecial]:
     return list(by_key.values())
 
 
+# A row that is NOT half-price but sits at >= this discount would render as
+# "1/2 price" in the app (which badges by discount_pct). Such rows are the
+# stale entries the half-price recency guard rejected — an old drop the item
+# is merely still priced at, not a current special — so they are never written.
+AMBIGUOUS_HALF_MIN_PCT = 48
+
+
+def enforce_badge_invariant(specials: list[WeeklySpecial]) -> tuple[list[WeeklySpecial], int]:
+    """Drop not-half rows at a half-price-looking discount; returns (kept, dropped)."""
+    kept = [s for s in specials
+            if s.is_half_price or (s.discount_pct or 0) < AMBIGUOUS_HALF_MIN_PCT]
+    return kept, len(specials) - len(kept)
+
+
 def _insert_scrape_run(cur: psycopg.Cursor, output: ScrapeOutput, items: int) -> str:
     cur.execute(
         """
@@ -89,6 +103,9 @@ def _upsert_products(cur: psycopg.Cursor, specials: list[WeeklySpecial]) -> dict
                 image_fetched_at = case
                     when products.image_url is null and excluded.image_url is not null then now()
                     else products.image_fetched_at end,
+                brand = coalesce(excluded.brand, products.brand),
+                barcode = coalesce(excluded.barcode, products.barcode),
+                size = coalesce(excluded.size, products.size),
                 last_seen = now()
             returning id::text, retailer, retailer_sku
             """,
@@ -103,9 +120,6 @@ def _insert_observations(cur, specials, ids) -> int:
     written = 0
     rows = []
     for s in specials:
-                brand = coalesce(excluded.brand, products.brand),
-                barcode = coalesce(excluded.barcode, products.barcode),
-                size = coalesce(excluded.size, products.size),
         pid = ids.get((s.retailer, product_sku(s)))
         if pid is None:
             continue
@@ -202,7 +216,10 @@ def bulk_write_to_db(output: ScrapeOutput, *, db_url: str, log: logging.Logger,
     sync_week=True makes the current week's specials for this source exactly match
     the written set (prunes stale rows) — use it for the recurring daily refreshes.
     """
-    specials = _dedup_by_sku(output.specials)
+    specials, ambiguous = enforce_badge_invariant(_dedup_by_sku(output.specials))
+    if ambiguous:
+        log.info("bulk.badge_invariant dropped=%d not-half rows at >=%d%% off",
+                 ambiguous, AMBIGUOUS_HALF_MIN_PCT)
     with psycopg.connect(db_url, connect_timeout=30) as conn:
         with conn.cursor() as cur:
             # Serialize writers: a local run and the GH Actions cron writing
