@@ -2,7 +2,6 @@
 hardening (malformed JSON / null ingredients must never crash the run) and the
 daily --revalidate repair flow."""
 import logging
-from datetime import datetime, timezone
 
 from src.generate_recipes import (
     Candidate,
@@ -157,7 +156,7 @@ class TestRevalidateFlow:
     """run(revalidate=True) branches: fresh -> no write, stale/missing -> regenerate,
     stale specials week -> skip. All DB touchpoints monkeypatched (no network)."""
 
-    WEEK = str(gr.most_recent_wednesday(datetime.now(timezone.utc).date()))
+    WEEK = str(gr.current_promo_week())
 
     def _setup(self, monkeypatch, *, week=None, week_rows=None):
         # 25 candidates clears the <20 floor; two of them power the seed recipes.

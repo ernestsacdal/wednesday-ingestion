@@ -41,6 +41,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from src.models import ScrapeOutput, ScrapeRun, WeeklySpecial
+from src.weeks import promo_week_start, sydney_today
 
 # Category code -> human label, vendored from the hotprices-au project's
 # web/site/model/categories.js (the dump carries only the numeric code).
@@ -347,7 +348,7 @@ def parse_products(raw_items: list[dict], *, log: logging.Logger,
     Marketplace / non-grocery items are dropped here, so nothing downstream
     (specials, catalogue, history backfill, predictor, matcher) ever sees them.
     """
-    today = today or datetime.now(timezone.utc).date()
+    today = today or sydney_today()
     products: list[ColesProduct] = []
     marketplace = 0
     for raw in raw_items:
@@ -365,7 +366,7 @@ def parse_products(raw_items: list[dict], *, log: logging.Logger,
 
 
 def _most_recent_wednesday(today: date) -> date:
-    return today - timedelta(days=(today.weekday() - 2) % 7)
+    return promo_week_start(today)
 
 
 def scrape(log: logging.Logger, *, today: date | None = None,
@@ -380,7 +381,7 @@ def scrape(log: logging.Logger, *, today: date | None = None,
         started_at=datetime.now(timezone.utc),
         source_url=HOTPRICES_URLS[retailer],
     )
-    today = today or datetime.now(timezone.utc).date()
+    today = today or sydney_today()
     week_start = _most_recent_wednesday(today)
     week_end = week_start + timedelta(days=6)
     scraped_at = datetime.now(timezone.utc)
@@ -436,7 +437,7 @@ if __name__ == "__main__":
 
     _log = configure_logging(verbose=True)
     _raw = fetch_dump("coles", log=_log)
-    _today = datetime.now(timezone.utc).date()
+    _today = sydney_today()
     _prods = parse_products(_raw, log=_log, today=_today)
     _cur = [p for p in _prods if p.is_current_half]
     _ge3 = [p for p in _prods if len(p.events) >= 3]

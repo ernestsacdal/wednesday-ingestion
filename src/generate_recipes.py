@@ -40,7 +40,7 @@ import requests
 
 from src.env import load_dotenv
 from src.scrapers.base import configure_logging
-from src.send_alerts import most_recent_wednesday
+from src.weeks import current_promo_week
 
 _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
@@ -491,7 +491,7 @@ def run(*, db_url: str, log: logging.Logger, seed: bool, write_db: bool,
     # hero with no current-week special. Regenerate the week when that happens;
     # leave it untouched (no churn) when every hero is still half-price.
     if revalidate:
-        expected = most_recent_wednesday(datetime.now(timezone.utc).date())
+        expected = current_promo_week()
         if str(expected) != week:
             log.info("recipes.skip stale_week expected=%s actual=%s", expected, week)
             return 0

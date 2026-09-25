@@ -26,9 +26,11 @@ import html
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date
 
 import requests
+
+from src.weeks import promo_week_start, sydney_today
 
 _BASE = "https://webservice.salefinder.com.au/index.php/api/"
 _APIKEY = "c0l8sDE5683419EEF6"   # public key embedded in SaleFinder's Coles widget
@@ -98,11 +100,12 @@ def _coles_id(sku: str | None) -> str | None:
     return digits or None
 
 
-def _current_sale_ids(log: logging.Logger, today: date) -> list[str]:
+def _current_sale_ids(log: logging.Logger, today: date) -> list[tuple[str, date]]:
+    """(saleId, startDate) of every catalogue running on ``today``."""
     data = _get_jsonp(f"sales/retailer/?id={_RETAILER_ID}&storeId={_STORE_ID}", log)
     if not data:
         return []
-    out: list[str] = []
+    out: list[tuple[str, date]] = []
     for wrap in data.get("items") or []:
         s = wrap.get("items", wrap)
         sid = s.get("saleId")
@@ -111,7 +114,7 @@ def _current_sale_ids(log: logging.Logger, today: date) -> list[str]:
             continue
         try:
             if date.fromisoformat(start) <= today <= date.fromisoformat(end):
-                out.append(str(sid))
+                out.append((str(sid), date.fromisoformat(start)))
         except (TypeError, ValueError):
             continue
     return out
@@ -119,8 +122,9 @@ def _current_sale_ids(log: logging.Logger, today: date) -> list[str]:
 
 def fetch_coles_catalogue(log: logging.Logger, *, today: date | None = None) -> CatalogueResult:
     """Current-week Coles catalogue items (half-price flagged), joined-by-id-ready."""
-    today = today or datetime.now(timezone.utc).date()
-    sale_ids = _current_sale_ids(log, today)
+    today = today or sydney_today()
+    running = _current_sale_ids(log, today)
+    sale_ids = [sid for sid, _start in running]
     if not sale_ids:
         return CatalogueResult(error="no_current_catalogue")
 
@@ -153,8 +157,9 @@ def fetch_coles_catalogue(log: logging.Logger, *, today: date | None = None) -> 
             if existing is None or (item.is_half and not existing.is_half):
                 by_id[cid] = item
 
-    # Coles promo week starts Wednesday; align to the catalogue's start.
-    week_start = today - __import__("datetime").timedelta(days=(today.weekday() - 2) % 7)
+    # The promo week is the catalogue's own (its start date), not the runner's
+    # clock — a Tuesday-night run still reads the catalogue that started last Wed.
+    week_start = promo_week_start(max(start for _sid, start in running))
     res = CatalogueResult(items=list(by_id.values()), sale_ids=sale_ids, week_start=week_start)
     log.info("salefinder.coles sale_ids=%s items=%d half=%d",
              ",".join(sale_ids), len(res.items), len(res.half))

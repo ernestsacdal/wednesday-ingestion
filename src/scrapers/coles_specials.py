@@ -35,6 +35,7 @@ from typing import Any
 import requests
 
 from src.models import ScrapeOutput, ScrapeRun, WeeklySpecial
+from src.weeks import current_promo_week
 
 _HALF_PRICE_URL = "https://www.coles.com.au/on-special?filter_Special=halfprice"
 _CDN_BASE = "https://cdn.productimages.coles.com.au/productimages"
@@ -179,8 +180,7 @@ def _to_special(p: dict[str, Any], *, week_start, week_end, scraped_at) -> Weekl
 
 
 def _most_recent_wednesday():
-    today = datetime.now(timezone.utc).date()
-    return today - timedelta(days=(today.weekday() - 2) % 7)
+    return current_promo_week()
 
 
 def scrape(session: requests.Session, log: logging.Logger) -> ScrapeOutput:

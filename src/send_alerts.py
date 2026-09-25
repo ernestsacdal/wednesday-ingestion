@@ -39,12 +39,13 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 
 import psycopg
 import requests
 
 from src.env import load_dotenv
+from src.weeks import current_promo_week, promo_week_start
 
 EXPO_SEND_URL = "https://exp.host/--/api/v2/push/send"
 EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts"
@@ -65,7 +66,7 @@ _EXPO_HEADERS = {
 
 def most_recent_wednesday(today: date) -> date:
     """Same week convention as the scrapers (Monday=0 ... Wednesday=2)."""
-    return today - timedelta(days=(today.weekday() - 2) % 7)
+    return promo_week_start(today)
 
 
 def _truncate(name: str) -> str:
@@ -294,7 +295,7 @@ def run_alerts(
             _gc_orphans(conn, log, stats)
 
         # Week gate: only digest when the specials table is on the CURRENT week.
-        expected = most_recent_wednesday(datetime.now(timezone.utc).date())
+        expected = current_promo_week()
         with conn.cursor() as cur:
             cur.execute("select max(week_start) from specials")
             actual = cur.fetchone()[0]

@@ -37,6 +37,7 @@ from src.models import (
     ConfidenceTier, Prediction, PredictionRunSummary, Retailer, WeeklySpecial,
 )
 from src.scrapers.base import configure_logging
+from src.weeks import sydney_today
 
 # Minimum number of historical intervals required to emit a prediction.
 # Plan calls for ≥8 once we have backfill; before that we relax to 1 so the
@@ -177,7 +178,7 @@ def _build_rationale(
 
 
 def _today() -> date:
-    return date.today()
+    return sydney_today()
 
 
 def _predict_for_product(

@@ -76,7 +76,8 @@ CHECKS: list[Check] = [
     Check(
         "week_is_current",
         """select (select max(week_start) from specials)
-                = (current_date - ((extract(dow from current_date)::int - 3 + 7) % 7))::date""",
+                = (d - ((extract(dow from d)::int - 3 + 7) % 7))::date
+           from (select (now() at time zone 'Australia/Sydney')::date as d) t""",
         lambda v: v is True, "max(week_start) == most recent Wednesday",
     ),
     # The class of incident 2: resurrected synthetic-keyed rows.

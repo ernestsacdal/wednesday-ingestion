@@ -24,12 +24,13 @@ import argparse
 import logging
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 import psycopg
 
 from src.env import load_dotenv
 from src.scrapers.base import configure_logging
+from src.weeks import sydney_today
 from src.scrapers.hotprices import (
     HOTPRICES_URLS, _most_recent_wednesday, fetch_dump, parse_products,
 )
@@ -103,7 +104,7 @@ def _load_product_ids(cur, retailer) -> dict[str, str]:
 
 def backfill(*, retailer: str, db_url: str, log: logging.Logger) -> dict[str, int]:
     raw = fetch_dump(retailer, log=log)
-    today = datetime.now(timezone.utc).date()
+    today = sydney_today()
     products = parse_products(raw, log=log, today=today, retailer=retailer)
     ever_half = [p for p in products if p.events]
     current_week = _most_recent_wednesday(today)
