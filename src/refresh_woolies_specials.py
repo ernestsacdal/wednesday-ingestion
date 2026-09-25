@@ -112,7 +112,7 @@ def refresh_woolies(*, db_url: str, log: logging.Logger,
 
     # Sticky-live guard: if this run resolved to the hotprices DUMP fallback but
     # the current week already holds a full LIVE set (source=woolies_catalogue) —
-    # e.g. a residential Scheduled Task on the dev's PC pulled the live Woolies
+    # e.g. a residential launchd job on the dev's Mac pulled the live Woolies
     # API that the cloud cron can't reach — KEEP the better live data instead of
     # overwriting it with the weaker dump. The cloud cron then just leaves Woolies
     # alone (it still refreshes Coles). A new week resets this naturally: until a

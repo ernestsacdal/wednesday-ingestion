@@ -11,7 +11,7 @@ name: daily-ingestion
 # dump refresh, so Coles is always same-day fresh and mid-week additions are
 # caught. Off-the-hour minute: GitHub's scheduler is most congested on :00
 # slots and has been dispatching 2.5-4h late; an odd minute dispatches closer
-# to time. The midday residential task (scripts/refresh-midday.ps1) is the
+# to time. The midday residential task (scripts/refresh-midday.sh) is the
 # primary week-roller; this run is the backstop (ADR-0001, wednesday repo).
 # Manual trigger also exposed.
 on:
