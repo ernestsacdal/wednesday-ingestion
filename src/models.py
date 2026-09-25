@@ -52,6 +52,12 @@ class WeeklySpecial:
     # When present the writers key the product row on this instead of the
     # synthetic name-based SKU, so distinct same-name products stay distinct.
     retailer_sku: str | None = None
+    # Product attributes when the source carries them (the Woolworths browse
+    # API does; the hotprices dump doesn't). The writer only fills blanks —
+    # a None never overwrites a known value.
+    brand: str | None = None
+    barcode: str | None = None
+    size: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -106,6 +112,10 @@ class ScrapeOutput:
     """Bundled artifacts from one scrape run, ready for JSON dump or DB write."""
     run: ScrapeRun
     specials: list[WeeklySpecial] = field(default_factory=list)
+    # Raw authoritative readings (src.truth.TruthRow) when the source is ground
+    # truth — the live Woolworths node emits one per tile, served or not.
+    truth_rows: list = field(default_factory=list)
+    truth_complete: bool = False
 
     def to_dict(self) -> dict:
         return {

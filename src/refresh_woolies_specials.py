@@ -25,16 +25,18 @@ import argparse
 import logging
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import date
 
 import psycopg
 
+from src.audit_woolies import audit_served
 from src.db.bulk_writer import bulk_write_to_db
 from src.db.reader import max_week_start
 from src.env import load_dotenv
 from src.scrapers.base import configure_logging
 from src.scrapers.woolies_specials import build_woolies_session, scrape
-from src.send_alerts import most_recent_wednesday
+from src.truth import upsert_truth
+from src.weeks import current_promo_week
 
 # Deliberate no-op: the run would have CREATED a new promo week with only
 # Woolworths in it (ADR-0001). Distinct from 0 (= both sources empty, a loud
@@ -52,6 +54,31 @@ def _coles_rows_for_week(db_url: str, week: date) -> int:
             {"w": week},
         )
         return cur.fetchone()[0]
+
+
+def _capture_truth(db_url: str, week: date, out, log: logging.Logger) -> None:
+    """Record the live node as ground truth, then audit what was being served.
+
+    Runs before the solo-roll guard, so a Wednesday-06:00 crawl still captures
+    the new promo week even though it may not write it. Never fails the
+    refresh: truth is evidence, not the serving path (and 0030 may not be
+    applied yet on a fresh checkout)."""
+    if not out.truth_rows:
+        return
+    try:
+        with psycopg.connect(db_url, connect_timeout=15) as conn, conn.cursor() as cur:
+            n = upsert_truth(cur, source="woolies_api", retailer="woolworths",
+                             week_start=week, rows=out.truth_rows)
+            log.info("refresh_woolies.truth captured=%d week=%s complete=%s",
+                     n, week, out.truth_complete)
+            cur.execute("select max(week_start) from specials")
+            served_week = cur.fetchone()[0]
+            if out.truth_complete and served_week == week:
+                audit_served(cur, week=week,
+                             truth={t.retailer_sku: t for t in out.truth_rows}, log=log)
+            conn.commit()
+    except Exception:  # noqa: BLE001
+        log.exception("refresh_woolies.truth_capture_failed — continuing with the refresh")
 
 
 def _scrape_woolies_dump(log: logging.Logger):
@@ -75,7 +102,20 @@ def refresh_woolies(*, db_url: str, log: logging.Logger,
     # together; until one of them does, keep serving last week complete.
     # Once a week IS rolled (max == expected) this always passes, so live
     # Woolies upgrades are never blocked by an already-broken state.
-    expected = most_recent_wednesday(datetime.now(timezone.utc).date())
+    expected = current_promo_week()
+
+    # The live crawl comes first (only when the API is in play) so its reading
+    # is captured as ground truth even on runs the guard below skips.
+    out = None
+    if not force_fallback:
+        try:
+            out = scrape(build_woolies_session(), log)
+        except Exception:  # noqa: BLE001 — fall through to the dump fallback
+            log.exception("refresh_woolies.live_api_error — will try hotprices dump fallback")
+            out = None
+    if out is not None:
+        _capture_truth(db_url, expected, out, log)
+
     db_max = max_week_start(db_url)
     if (db_max is None or expected > db_max) and _coles_rows_for_week(db_url, expected) == 0:
         log.warning(
@@ -84,14 +124,6 @@ def refresh_woolies(*, db_url: str, log: logging.Logger,
             expected,
         )
         return SKIP_WEEK_NOT_ROLLED
-
-    out = None
-    if not force_fallback:
-        try:
-            out = scrape(build_woolies_session(), log)
-        except Exception:  # noqa: BLE001 — fall through to the dump fallback
-            log.exception("refresh_woolies.live_api_error — will try hotprices dump fallback")
-            out = None
 
     if out is None or not out.specials:
         # Live API blocked or empty (common from GitHub Actions datacenter IPs).

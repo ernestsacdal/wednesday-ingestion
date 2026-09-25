@@ -9,11 +9,11 @@ import pytest
 
 from src import refresh_coles_hotprices as rc
 from src import refresh_woolies_specials as rw
-from src.send_alerts import most_recent_wednesday
+from src.weeks import current_promo_week
 
 LOG = logging.getLogger("test")
 
-EXPECTED = most_recent_wednesday(datetime.now(timezone.utc).date())
+EXPECTED = current_promo_week()
 LAST_WEEK = EXPECTED - timedelta(days=7)
 
 
@@ -56,6 +56,16 @@ class TestSoloRollGuard:
         self._setup(monkeypatch, db_max=None, coles_rows=1070)
         with pytest.raises(_Bail):
             rw.refresh_woolies(db_url="x", log=LOG, force_fallback=True)
+
+    def test_wednesday_0600_sydney_is_the_new_week(self, monkeypatch):
+        # Wed 30 Sep 06:00 AEST is still Tue 29 Sep in UTC. The guard must see
+        # the NEW week (not yet rolled -> skip), not last week (which it used
+        # to overwrite with the new promo's live set and then prune).
+        wed_0600 = datetime(2026, 9, 29, 20, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(rw, "current_promo_week", lambda: current_promo_week(wed_0600))
+        self._setup(monkeypatch, db_max=date(2026, 9, 23), coles_rows=0)
+        got = rw.refresh_woolies(db_url="x", log=LOG, force_fallback=True)
+        assert got == rw.SKIP_WEEK_NOT_ROLLED
 
     def test_main_exit_map(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_DB_URL", "postgres://x")

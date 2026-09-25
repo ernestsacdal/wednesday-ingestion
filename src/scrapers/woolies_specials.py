@@ -25,6 +25,7 @@ reliable Coles price source is found (tracked separately).
 from __future__ import annotations
 
 import logging
+import math
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -33,12 +34,24 @@ import requests
 
 from src.models import ScrapeOutput, ScrapeRun, WeeklySpecial
 from src.scrapers.product_images import _BROWSER_HEADERS, build_image_session
+from src.truth import TruthRow
+from src.weeks import current_promo_week
 
 _BROWSE_API = "https://www.woolworths.com.au/apis/ui/browse/category"
 _HALF_PRICE_NODE = "specialsgroup.3676"
 _HALF_PRICE_URL = "/shop/browse/specials/half-price"
 _PAGE_SIZE = 36  # the browse API rejects larger page sizes with HTTP 400
-_MAX_PAGES = 80  # safety ceiling; real count is ~1,700 (~47 pages)
+# Sort by Name: pages are then stable and disjoint (measured 2026-09-25: 49
+# pages, 1,729 tiles, 1,729 unique == TotalRecordCount). The default
+# 'TraderRelevance' order reshuffles between requests, so pages overlap —
+# 2,471 tiles for 1,839 unique items — and the crawl hit the page ceiling
+# before it saw everything.
+_SORT = "Name"
+_MAX_PAGES_CAP = 120   # hard ceiling; the real bound is derived from the total
+_PAGE_SLACK = 3        # extra pages beyond ceil(total / page size)
+# A crawl that sees fewer unique items than this share of TotalRecordCount is
+# 'partial': the writer then upserts only and never prunes (no false deletes).
+_COMPLETE_SHARE = 0.98
 _DELAY_SECONDS = 0.4
 
 
@@ -52,7 +65,7 @@ def _browse_page(session: requests.Session, page: int) -> dict[str, Any]:
         "categoryId": _HALF_PRICE_NODE,
         "pageNumber": page,
         "pageSize": _PAGE_SIZE,
-        "sortType": "TraderRelevance",
+        "sortType": _SORT,
         "url": _HALF_PRICE_URL,
         "location": _HALF_PRICE_URL,
         "formatObject": '{"name":"Half Price"}',
@@ -89,6 +102,9 @@ def _to_special(
     price = p.get("Price")
     was = p.get("WasPrice")
     if not name or price is None or was is None:
+        # Unavailable items carry Price None (and are never IsHalfPrice).
+        return None
+    if p.get("IsMarketProduct"):
         return None
     try:
         sale_cents = round(float(price) * 100)
@@ -99,6 +115,11 @@ def _to_special(
     if reg_cents <= 0 or sale_cents <= 0 or sale_cents >= reg_cents:
         return None
     discount_pct = round(100 * (reg_cents - sale_cents) / reg_cents)
+    # Woolworths' own flag is the ground truth for "half price" (a node item at
+    # 49.6% off is half-price on the shelf). The percentage is only a fallback
+    # for responses that ever lack the field.
+    flag = p.get("IsHalfPrice")
+    is_half = bool(flag) if flag is not None else discount_pct >= 48
     image_url = (
         p.get("LargeImageFile") or p.get("MediumImageFile") or p.get("SmallImageFile") or None
     )
@@ -110,7 +131,7 @@ def _to_special(
         regular_price_cents=reg_cents,
         sale_price_cents=sale_cents,
         discount_pct=discount_pct,
-        is_half_price=discount_pct >= 50,
+        is_half_price=is_half,
         last_halfprice_raw="",
         last_halfprice_weeks_ago=None,
         last_halfprice_retailer=None,
@@ -123,13 +144,61 @@ def _to_special(
         # Real Woolies key (matches the hotprices Woolies dump id = stockcode),
         # so the live-API and dump-fallback paths upsert the same product row.
         retailer_sku=f"woolworths:{stockcode}" if stockcode is not None else None,
+        brand=_clean(p.get("Brand")),
+        barcode=_clean(p.get("Barcode")),
+        size=_clean(p.get("PackageSize")),
+    )
+
+
+def _clean(value: Any) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _dedup_key(p: dict[str, Any], sp: WeeklySpecial) -> str:
+    """Stockcode identity; name only when a tile somehow lacks a stockcode.
+
+    Name dedup silently dropped distinct products that share a display name
+    (~40 half-price items on 2026-09-24)."""
+    code = p.get("Stockcode")
+    return f"sku:{code}" if code is not None else f"name:{sp.product_name.lower()}"
+
+
+def _max_pages(total: int | None) -> int:
+    if not total:
+        return _MAX_PAGES_CAP
+    return min(_MAX_PAGES_CAP, math.ceil(total / _PAGE_SIZE) + _PAGE_SLACK)
+
+
+def is_complete(unique_seen: int, total: int | None) -> bool:
+    """True when the crawl saw (nearly) every item the node reports."""
+    return bool(total) and unique_seen >= _COMPLETE_SHARE * total
+
+
+def _cents(value: Any) -> int | None:
+    try:
+        return round(float(value) * 100) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def to_truth(p: dict[str, Any]) -> TruthRow | None:
+    """The raw Woolworths reading for one node tile, independent of serving rules."""
+    code = p.get("Stockcode")
+    if code is None:
+        return None
+    return TruthRow(
+        retailer_sku=f"woolworths:{code}",
+        is_half=bool(p.get("IsHalfPrice")),
+        sale_cents=_cents(p.get("Price")),
+        was_cents=_cents(p.get("WasPrice")),
+        available=p.get("IsAvailable"),
+        instore_special=p.get("InstoreIsOnSpecial"),
     )
 
 
 def _most_recent_wednesday():
-    today = datetime.now(timezone.utc).date()
-    # Monday=0 ... Wednesday=2
-    return today - timedelta(days=(today.weekday() - 2) % 7)
+    return current_promo_week()
 
 
 def scrape(session: requests.Session, log: logging.Logger) -> ScrapeOutput:
@@ -143,11 +212,14 @@ def scrape(session: requests.Session, log: logging.Logger) -> ScrapeOutput:
     scraped_at = datetime.now(timezone.utc)
 
     specials: list[WeeklySpecial] = []
-    seen_names: set[str] = set()
+    seen_keys: set[str] = set()
+    seen_codes: set[Any] = set()   # every tile, incl. unavailable — for completeness
+    truth: dict[str, TruthRow] = {}
     total_expected: int | None = None
 
     try:
-        for page in range(1, _MAX_PAGES + 1):
+        page = 1
+        while page <= _max_pages(total_expected):
             data = _browse_page(session, page)
             if total_expected is None:
                 total_expected = data.get("TotalRecordCount")
@@ -156,33 +228,48 @@ def scrape(session: requests.Session, log: logging.Logger) -> ScrapeOutput:
             if not page_products:
                 break
             for p in page_products:
+                seen_codes.add(p.get("Stockcode") or p.get("Name"))
+                t = to_truth(p)
+                if t is not None:
+                    truth[t.retailer_sku] = t
                 sp = _to_special(p, week_start=week_start, week_end=week_end, scraped_at=scraped_at)
                 if sp is None:
                     continue
-                # Dedup by name (browse can repeat across grouped tiles).
-                key = sp.product_name.lower()
-                if key in seen_names:
+                key = _dedup_key(p, sp)
+                if key in seen_keys:
                     continue
-                seen_names.add(key)
+                seen_keys.add(key)
                 specials.append(sp)
             log.info("woolies_specials.page page=%d collected=%d", page, len(specials))
-            if total_expected is not None and len(seen_names) >= total_expected:
+            if total_expected is not None and len(seen_codes) >= total_expected:
                 break
+            page += 1
             time.sleep(_DELAY_SECONDS)
     except Exception as e:  # noqa: BLE001 — partial data is still useful
         log.exception("woolies_specials.error")
         if specials:
             run.finalise(status="partial", items=len(specials), error=str(e))
-            return ScrapeOutput(run=run, specials=specials)
+            return ScrapeOutput(run=run, specials=specials, truth_rows=list(truth.values()))
         run.finalise(status="failed", items=0, error=str(e))
         return ScrapeOutput(run=run)
 
     half = sum(1 for s in specials if s.is_half_price)
-    run.finalise(status="success" if specials else "no_data", items=len(specials))
-    run.notes = f"half_price={half} expected={total_expected}"
-    log.info("woolies_specials.done collected=%d half_price=%d expected=%s",
-             len(specials), half, total_expected)
-    return ScrapeOutput(run=run, specials=specials)
+    complete = is_complete(len(seen_codes), total_expected)
+    if not specials:
+        status = "no_data"
+    elif complete:
+        status = "success"
+    else:
+        # Missing items must not be pruned as "no longer on special".
+        status = "partial"
+        log.warning("woolies_specials.incomplete seen=%d expected=%s — writing as partial",
+                    len(seen_codes), total_expected)
+    run.finalise(status=status, items=len(specials))
+    run.notes = f"half_price={half} seen={len(seen_codes)} expected={total_expected}"
+    log.info("woolies_specials.done collected=%d half_price=%d seen=%d expected=%s status=%s",
+             len(specials), half, len(seen_codes), total_expected, status)
+    return ScrapeOutput(run=run, specials=specials, truth_rows=list(truth.values()),
+                        truth_complete=complete)
 
 
 if __name__ == "__main__":

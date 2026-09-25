@@ -68,14 +68,15 @@ def _upsert_products(cur: psycopg.Cursor, specials: list[WeeklySpecial]) -> dict
             sku = product_sku(s)
             img_at = now if s.image_url else None
             rows.append((s.retailer, sku, s.product_name, s.category,
-                         s.regular_price_cents, s.image_url, img_at, now))
-        ph = ",".join(["(%s,%s,%s,%s,%s,%s::text,%s,%s)"] * len(batch))
+                         s.regular_price_cents, s.image_url, img_at, now,
+                         s.brand, s.barcode, s.size))
+        ph = ",".join(["(%s,%s,%s,%s,%s,%s::text,%s,%s,%s::text,%s::text,%s::text)"] * len(batch))
         flat = [v for r in rows for v in r]
         cur.execute(
             f"""
             insert into products
                 (retailer, retailer_sku, name, category, regular_price_cents,
-                 image_url, image_fetched_at, last_seen)
+                 image_url, image_fetched_at, last_seen, brand, barcode, size)
             values {ph}
             on conflict (retailer, retailer_sku) do update set
                 name = excluded.name,
@@ -102,6 +103,9 @@ def _insert_observations(cur, specials, ids) -> int:
     written = 0
     rows = []
     for s in specials:
+                brand = coalesce(excluded.brand, products.brand),
+                barcode = coalesce(excluded.barcode, products.barcode),
+                size = coalesce(excluded.size, products.size),
         pid = ids.get((s.retailer, product_sku(s)))
         if pid is None:
             continue
