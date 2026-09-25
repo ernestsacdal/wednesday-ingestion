@@ -164,6 +164,7 @@ is now engineered away:
 | Workflow | Cron (UTC) | Steps |
 |---|---|---|
 | `daily-ingestion.yml` | 02:00 daily | Coles refresh (dump) -> Woolies refresh (API, dump fallback) -> image fill -> push digests (`send_alerts`, once per device per week via DB dedup) -> **verify_data** |
+| `verify-live.yml` | 05:07 daily (15:07 AEST) | **verify_data** only: fails the same day if the live Woolworths set is missing after the Wednesday 15:00 deadline or no live run landed in 36h |
 | `weekly-catalogue.yml` | 03:00 Sunday | full catalogue load -> predictor -> backtest (track record) -> cross-store matcher -> **verify_data** |
 
 ## Module map
@@ -176,6 +177,9 @@ src/
 ├── ingest_catalogue.py          weekly full catalogue -> products (search-only)
 ├── backfill_history.py          one-time deep half-price history per retailer
 ├── verify_data.py               post-run invariants; non-zero exit fails the run
+├── weeks.py                     Sydney-local promo-week math (the one week convention)
+├── truth.py                     ground-truth capture (truth_snapshots)
+├── audit_woolies.py             served Woolworths set vs the live Half Price node
 ├── backtest.py                  walk-forward predictor backtest -> accuracy tables
 ├── match_counterparts.py        cross-store product matcher -> product_aliases
 ├── send_alerts.py               weekly watchlist push digests (Expo)
@@ -202,10 +206,10 @@ src/
 
 ## Running locally
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+```bash
+python3.13 -m venv .venv          # or: uv venv --python 3.13 .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
 
 # .env in the repo root (use the Supabase Session Pooler URI - IPv4):
 #   SUPABASE_DB_URL=postgresql://...
@@ -226,6 +230,14 @@ python -m src.match_counterparts --write-db
 # Check the invariants any time:
 python -m src.verify_data --verbose
 ```
+
+Residential jobs: the live Woolworths API is blocked from GitHub Actions
+IPs, so two jobs also run from a home machine (macOS launchd):
+`scripts/refresh-woolies.sh` (06:00, live Woolies refresh) and
+`scripts/refresh-midday.sh` (12:30, atomic week roll: Coles, live Woolies,
+SaleFinder corrections, dinners). `scripts/install-launchd.sh` registers
+both (`--uninstall` removes them); logs go to `~/Library/Logs/Wednesday/`.
+The cloud cron remains the backstop when that machine is off.
 
 Conventions: every CLI exits 0 on success and non-zero on failure (so CI
 steps fail loudly); destructive scripts dry-run by default; all writes

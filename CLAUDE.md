@@ -11,8 +11,8 @@ Python pipeline for Wednesday's data spine. Public sibling repo to the private `
 
 ## Stack
 
-- Python 3.13 (system install at `C:\Users\sacda\AppData\Local\Programs\Python\Python313\python.exe`)
-- Local venv at `.venv/` (recreate with `python -m venv .venv` if needed)
+- Python 3.13 via uv (macOS dev machine; CI pins 3.13 too)
+- Local venv at `.venv/` (recreate with `uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r requirements-dev.txt`)
 - Deps: `requests`, `beautifulsoup4`, `lxml`, `python-dateutil` — pure stdlib for stats (no numpy/pandas yet)
 - GitHub Actions for the weekly cron (`.github/workflows/weekly-ingestion.yml`, fires 16:00 UTC Tuesday ≈ 2am Wed Sydney)
 
@@ -38,16 +38,21 @@ src/
 
 ## Run locally
 
-```powershell
+```bash
 # Setup (once)
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python -r requirements-dev.txt
+# .env in the repo root: SUPABASE_DB_URL=<Session Pooler URI>, optional GROQ_API_KEY
 
-# Scrape + write JSON dump
-.\.venv\Scripts\python.exe -m src.pipeline --write-json data/runs --verbose
+# Tests (pure logic, no DB)
+.venv/bin/python -m pytest
 
-# Run statistical predictor against the latest scrape
-.\.venv\Scripts\python.exe -m src.prediction.statistical "data/runs/stockup_post_*.json" --output data/predictions
+# Daily pipeline + invariants (see README "Running locally" for the full list)
+.venv/bin/python -m src.pipeline --write-db --verbose
+.venv/bin/python -m src.verify_data --verbose
+
+# Residential launchd jobs (06:00 Woolies live refresh, 12:30 midday roll)
+scripts/install-launchd.sh               # --uninstall to remove; logs in ~/Library/Logs/Wednesday/
 ```
 
 Module imports use `from src.X import Y` — must run from the repo root so `src` is on `PYTHONPATH`. The CLI assumes this (calling `python -m src.pipeline` from anywhere else will fail with `ModuleNotFoundError: src`).
@@ -66,7 +71,7 @@ JSON dumps under `data/runs/` and `data/predictions/` are shaped to map 1:1 onto
 
 ## Where this fits
 
-This repo is one of two; the main project is at `..\wednesday\` (private monorepo with mobile + web + supabase migrations). Build plan is at `C:\Users\sacda\.claude\plans\lets-plan-on-how-bright-fiddle.md`. Cross-repo Phase 0 findings doc is `..\wednesday\docs\phase-0-findings.md`.
+This repo is one of two; the main project is at `../wednesday/` (private monorepo with mobile + web + supabase migrations, and the up-to-date `CLAUDE.md`). Build plan is at `~/.claude/plans/lets-plan-on-how-bright-fiddle.md` (carried over from the old Windows machine, if copied). Cross-repo Phase 0 findings doc is `../wednesday/docs/phase-0-findings.md`.
 
 ## Phase status
 
