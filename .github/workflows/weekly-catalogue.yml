@@ -79,4 +79,5 @@ jobs:
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           PYTHONIOENCODING: utf-8
+          WOOLIES_LIVE_REQUIRED: ${{ vars.WOOLIES_LIVE_REQUIRED }}
         run: python -m src.verify_data --verbose

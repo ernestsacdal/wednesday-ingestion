@@ -15,6 +15,9 @@ and standalone:
 
 Thresholds are deliberately loose floors (roughly a third of typical) so
 normal weekly variance never cries wolf; only real breakage trips them.
+A check with severity "warn" logs loudly but never fails the run. Set
+WOOLIES_LIVE_REQUIRED=0 (a repo variable in CI) to downgrade the live-Woolies
+checks to warnings while the residential Mac is deliberately offline.
 Requires SUPABASE_DB_URL.
 """
 from __future__ import annotations
@@ -24,19 +27,28 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
+from typing import Any, Callable
 
 import psycopg
 
 from src.env import load_dotenv
 from src.scrapers.base import configure_logging
+from src.weeks import live_deadline_passed
 
 
 @dataclass
 class Check:
     name: str
     sql: str
-    ok: "callable"  # scalar -> bool
-    expect: str     # human description of the passing condition
+    ok: Callable[[Any], bool]
+    expect: str                    # human description of the passing condition
+    severity: str = "fail"         # "fail" reddens the run; "warn" only logs
+    active: Callable[[], bool] | None = None   # None = always evaluated
+
+
+# Checks that depend on the residential Mac pulling the live Woolworths API.
+# WOOLIES_LIVE_REQUIRED=0 downgrades them to warnings (e.g. travelling).
+LIVE_WOOLIES_CHECKS = {"woolies_live_heartbeat", "woolies_current_week_live"}
 
 
 CHECKS: list[Check] = [
@@ -136,6 +148,28 @@ CHECKS: list[Check] = [
              and run_at > now() - interval '26 hours'""",
         lambda v: v >= 1, ">= 1 run in 26h",
     ),
+    # The live Woolworths API only works from the residential Mac. When it
+    # stops, the cloud cron silently serves the hotprices dump fallback
+    # (~89% precision / ~78% recall measured 2026-09-24) — which is exactly
+    # how a whole week went out on the fallback unnoticed. Both of these fail
+    # loudly so a sleeping/offline Mac is an inbox ping, not a quiet
+    # accuracy drop.
+    Check(
+        "woolies_live_heartbeat",
+        """select count(*) from scrape_runs
+           where status in ('success', 'partial') and source = 'woolies_catalogue'
+             and run_at > now() - interval '36 hours'""",
+        lambda v: v >= 1, ">= 1 live Woolies API run in 36h (residential Mac)",
+    ),
+    Check(
+        "woolies_current_week_live",
+        """select count(*) from specials s join products p on p.id = s.product_id
+           where s.week_start = (select max(week_start) from specials)
+             and s.is_half_price and p.retailer = 'woolworths'
+             and s.source = 'woolies_catalogue'""",
+        lambda v: v >= 400, ">= 400 live-sourced Woolies half-price rows this week",
+        active=live_deadline_passed,   # from Wed 15:00 Sydney onwards
+    ),
     Check(
         "woolies_scraped_recently",
         """select count(*) from scrape_runs
@@ -174,6 +208,16 @@ CHECKS: list[Check] = [
              and sale_price_cents > regular_price_cents""",
         lambda v: v == 0, "== 0",
     ),
+    # A not-half row at a half-looking discount shows a "1/2 price" badge in the
+    # app. The bulk writer drops these (enforce_badge_invariant); this catches
+    # any other path that writes them.
+    Check(
+        "no_ambiguous_half_badge",
+        """select count(*) from specials
+           where week_start = (select max(week_start) from specials)
+             and not is_half_price and discount_pct >= 48""",
+        lambda v: v == 0, "== 0 not-half rows at >= 48% off this week",
+    ),
     # Category coverage doesn't regress (the source caps us around ~30% uncoded).
     Check(
         "uncategorised_share",
@@ -208,16 +252,6 @@ CHECKS: list[Check] = [
     Check(
         "dinners_fresh_when_live",
         """select case
-    # A not-half row at a half-looking discount shows a "1/2 price" badge in the
-    # app. The bulk writer drops these (enforce_badge_invariant); this catches
-    # any other path that writes them.
-    Check(
-        "no_ambiguous_half_badge",
-        """select count(*) from specials
-           where week_start = (select max(week_start) from specials)
-             and not is_half_price and discount_pct >= 48""",
-        lambda v: v == 0, "== 0 not-half rows at >= 48% off this week",
-    ),
                  when (select count(*) from recipes
                        where generated_at > now() - interval '8 days') = 0 then 99
                  else (select count(*) from recipes
@@ -246,25 +280,53 @@ CHECKS: list[Check] = [
 ]
 
 
+def effective_severity(check: Check, env: dict[str, str] | None = None) -> str:
+    env = os.environ if env is None else env
+    if check.name in LIVE_WOOLIES_CHECKS and env.get("WOOLIES_LIVE_REQUIRED") == "0":
+        return "warn"
+    return check.severity
+
+
+def evaluate(results: list[tuple[Check, Any]], env: dict[str, str] | None = None
+             ) -> tuple[list[str], list[str]]:
+    """Pure pass/fail aggregation: (failed names, warned names).
+
+    ``results`` pairs each evaluated check with its SQL value; skipped
+    (inactive) checks are simply absent.
+    """
+    failed: list[str] = []
+    warned: list[str] = []
+    for check, value in results:
+        if check.ok(value):
+            continue
+        (warned if effective_severity(check, env) == "warn" else failed).append(check.name)
+    return failed, warned
+
+
 def verify(*, db_url: str, log: logging.Logger) -> int:
-    """Run all checks; return the number of failures."""
-    failures = 0
+    """Run all checks; return the number of failures (warnings don't count)."""
+    results: list[tuple[Check, Any]] = []
     with psycopg.connect(db_url, connect_timeout=30) as conn, conn.cursor() as cur:
         for check in CHECKS:
+            if check.active is not None and not check.active():
+                log.info("verify.skip %-26s (not active yet)", check.name)
+                continue
             cur.execute(check.sql)
-            value = cur.fetchone()[0]
-            if check.ok(value):
-                log.info("verify.pass %-26s value=%s", check.name, value)
-            else:
-                failures += 1
-                log.error("verify.FAIL %-26s value=%s expected %s",
-                          check.name, value, check.expect)
-    if failures:
-        log.error("verify.result FAILED checks=%d/%d — data needs attention",
-                  failures, len(CHECKS))
+            results.append((check, cur.fetchone()[0]))
+    failed, warned = evaluate(results)
+    for check, value in results:
+        if check.name in failed:
+            log.error("verify.FAIL %-26s value=%s expected %s", check.name, value, check.expect)
+        elif check.name in warned:
+            log.warning("verify.WARN %-26s value=%s expected %s", check.name, value, check.expect)
+        else:
+            log.info("verify.pass %-26s value=%s", check.name, value)
+    if failed:
+        log.error("verify.result FAILED checks=%d/%d (warnings=%d) — data needs attention",
+                  len(failed), len(results), len(warned))
     else:
-        log.info("verify.result all %d checks passed", len(CHECKS))
-    return failures
+        log.info("verify.result all %d checks passed (warnings=%d)", len(results), len(warned))
+    return len(failed)
 
 
 def main(argv: list[str] | None = None) -> int:

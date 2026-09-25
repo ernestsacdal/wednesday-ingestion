@@ -1,0 +1,41 @@
+name: verify-live
+
+# Same-day alarm for the residential Woolworths feed. The live Woolworths API
+# is blocked from GitHub's datacenter IPs, so live data only arrives when the
+# home Mac's launchd jobs run (scripts/install-launchd.sh). If the Mac is
+# asleep or off, the cloud cron quietly serves the weaker hotprices dump
+# fallback. This runs verify_data mid-afternoon Sydney time — after the
+# Wednesday 15:00 live deadline — so a missed live roll fails the same day
+# and GitHub's failure email says so. Set the repo variable
+# WOOLIES_LIVE_REQUIRED=0 to downgrade those checks while away.
+on:
+  schedule:
+    - cron: "7 5 * * *"  # 05:07 UTC = 15:07 AEST / 16:07 AEDT
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify live Woolies + data invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify data invariants
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+          WOOLIES_LIVE_REQUIRED: ${{ vars.WOOLIES_LIVE_REQUIRED }}
+        run: python -m src.verify_data --verbose
