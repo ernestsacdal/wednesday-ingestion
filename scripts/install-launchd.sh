@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Register (or remove) the two residential-IP jobs as per-user launchd agents:
 #
-#   com.ernestmikhail.wednesday.woolies-refresh   daily 06:00         refresh-woolies.sh
-#   com.ernestmikhail.wednesday.midday-roll       daily 12:30 + 13:45 refresh-midday.sh
+#   com.ernestmikhail.wednesday.woolies-refresh   daily 06:00, 09:00                 refresh-woolies.sh
+#   com.ernestmikhail.wednesday.midday-roll       daily 12:30, 13:45, 17:00, 20:30   refresh-midday.sh
 #
 # The 13:45 midday retry covers daylight saving: at 12:30 AEDT the hotprices
 # Coles dump (refreshed ~01:00 UTC) may be only minutes old, so the stale-dump
 # gate can block the roll; the retry rolls it. Re-runs are safe (ADR-0001).
+# The later slots are recovery for a Mac that was asleep or offline: each
+# script exits at once if it already succeeded that day.
 #
 # Times are the Mac's local time (Australia/Sydney). launchd runs a missed
 # calendar job once the Mac wakes from sleep (the old Windows tasks'
@@ -28,8 +30,8 @@ domain="gui/$(id -u)"
 
 # label  script  HH:MM[,HH:MM...]
 jobs=(
-    "com.ernestmikhail.wednesday.woolies-refresh refresh-woolies.sh 06:00"
-    "com.ernestmikhail.wednesday.midday-roll refresh-midday.sh 12:30,13:45"
+    "com.ernestmikhail.wednesday.woolies-refresh refresh-woolies.sh 06:00,09:00"
+    "com.ernestmikhail.wednesday.midday-roll refresh-midday.sh 12:30,13:45,17:00,20:30"
 )
 
 calendar_entries() {
