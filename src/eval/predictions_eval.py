@@ -256,8 +256,12 @@ def _load(cur) -> tuple[dict[str, list[Pred]], dict[str, set[date]], dict[str, s
     halves: dict[str, set[date]] = defaultdict(set)
     for pid, wk in cur.fetchall():
         halves[pid].add(promo_week_start(wk))
-    cur.execute("select id::text, retailer from products where id in "
-                "(select distinct product_id from predictions)")
+    # Every product the history or the ledger mentions: the predictions table
+    # keeps only the latest run, so older ledger claims reference products it
+    # no longer predicts.
+    cur.execute("""select id::text, retailer from products where id in
+                     (select product_id from predictions
+                      union select product_id from prediction_shown)""")
     retailer = dict(cur.fetchall())
     return history, halves, retailer
 
