@@ -58,6 +58,15 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m src.backtest --write-db
 
+      # Honest prediction track record: record the predictions shown for the
+      # live promo week (prediction_shown ledger) and republish accuracy_stats
+      # from how those claims actually turned out (src/eval/predictions_eval).
+      - name: Score predictions as shown
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.eval.predictions_eval --snapshot --score --write-db --verbose
+
       - name: Refresh cross-store counterpart links
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
