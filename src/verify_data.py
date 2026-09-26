@@ -180,10 +180,19 @@ CHECKS: list[Check] = [
     ),
     # Derived data staleness (predictor / backtest / matcher are scheduled
     # weekly — 9 days flags a skipped week).
+    # Predictions (hazard_v2) are recomputed daily after the week roll.
     Check(
         "predictions_fresh",
         "select coalesce(extract(epoch from now() - max(computed_at)) / 86400, 999) from predictions",
-        lambda v: v <= 9, "newest <= 9 days old",
+        lambda v: v <= 2, "newest <= 2 days old (daily recompute)",
+    ),
+    # Every shown window looks forward: a window already over means the daily
+    # recompute has stopped and the app is showing "Window passed".
+    Check(
+        "no_expired_predictions",
+        """select count(*) from predictions
+           where predicted_window_end < (now() at time zone 'Australia/Sydney')::date""",
+        lambda v: v == 0, "== 0 prediction windows already over",
     ),
     # The predictions writer keeps only the latest run (superseded runs are
     # pruned after the served week is snapshotted into prediction_shown), so
