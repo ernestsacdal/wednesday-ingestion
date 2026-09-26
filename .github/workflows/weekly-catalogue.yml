@@ -46,17 +46,21 @@ jobs:
       # Weekly derived-data refresh. Without these, predictions drift into the
       # past, the track record goes stale, and new products never gain
       # cross-store links — all silently. Each step fails the run on error.
-      - name: Recompute predictions
+      # Prediction v2 (hazard_v2): refresh the walk-forward gate report, the
+      # per-retailer calibration map and each product's replay track record,
+      # then recompute predictions. A failing gate logs loudly and leaves the
+      # served predictions as they are (rollback: src.prediction.statistical).
+      - name: Re-evaluate prediction model (walk-forward gate + calibration)
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           PYTHONIOENCODING: utf-8
-        run: python -m src.prediction.statistical --from-db --write-db --min-cycles 1
+        run: python -m src.prediction.hazard --eval --write-db --verbose
 
-      - name: Recompute prediction track record (backtest)
+      - name: Recompute predictions (hazard_v2)
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           PYTHONIOENCODING: utf-8
-        run: python -m src.backtest --write-db
+        run: python -m src.prediction.hazard --write-db --verbose
 
       # Honest prediction track record: record the predictions shown for the
       # live promo week (prediction_shown ledger) and republish accuracy_stats

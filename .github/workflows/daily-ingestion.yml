@@ -88,6 +88,14 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m src.generate_recipes --seed --write-db --revalidate --verbose
 
+      # Daily prediction recompute after the (possible) week roll, so windows
+      # always look forward from the served week.
+      - name: Recompute predictions (hazard_v2)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.prediction.hazard --write-db --verbose
+
       # Honest prediction track record: record the predictions shown for the
       # live promo week (prediction_shown ledger) and republish accuracy_stats
       # from how those claims actually turned out (src/eval/predictions_eval).

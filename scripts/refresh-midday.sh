@@ -50,6 +50,7 @@ run_step coles   -m src.refresh_coles_hotprices --verbose
 run_step woolies -m src.refresh_woolies_specials --verbose
 run_step audit   -m src.audit_accuracy --write-db --correct --verbose
 run_step dinners -m src.generate_recipes --seed --write-db --revalidate --verbose
+run_step predict -m src.prediction.hazard --write-db --verbose
 run_step ledger  -m src.eval.predictions_eval --snapshot --write-db --verbose
 
 echo "[$(date -Iseconds)] finished exit=$final" >> "$log"
