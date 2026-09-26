@@ -29,6 +29,7 @@ Pipeline:
 
     python -m src.eval.predictions_eval --backfill --score --write-db
     python -m src.eval.predictions_eval --snapshot --score --write-db   # daily
+    python -m src.eval.predictions_eval --fit-calibration --write-db    # raw-era PAV map
 """
 from __future__ import annotations
 
@@ -45,6 +46,7 @@ from datetime import date, datetime, time, timedelta
 import psycopg
 
 from src.env import load_dotenv
+from src.eval import calibrate
 from src.scrapers.base import configure_logging
 from src.weeks import SYDNEY, current_promo_week, promo_week_start
 
@@ -83,6 +85,7 @@ class Scored:
     hit: bool
     width: int
     naive_hit: bool
+    computed_at: datetime | None = None
 
 
 def app_bucket(confidence: float) -> str | None:
@@ -180,6 +183,61 @@ def summarize(scored: list[Scored]) -> dict:
     }
 
 
+def score_ledger(ledger: list[tuple], halves: dict[str, set[date]],
+                 retailer: dict[str, str], current: date) -> list[Scored]:
+    """Score every claim old enough for its window to have fully elapsed."""
+    oldest_scored = current - timedelta(weeks=_MIN_AGE_WEEKS)
+    scored = []
+    for claim in first_shown_claims(ledger):
+        if claim[1] > oldest_scored:
+            continue
+        res = score_claim(claim, halves.get(claim[0], set()), current)
+        if res is None:
+            continue
+        hit, width, naive = res
+        scored.append(Scored(claim[0], retailer.get(claim[0], "?"), claim[1], claim[4],
+                             claim[5], hit, width, naive, claim[6]))
+    return scored
+
+
+def calibration_pairs(scored: list[Scored]) -> dict[str, list[tuple[float, bool]]]:
+    """(raw score, hit) per retailer from claims computed before calibration began."""
+    pairs: dict[str, list[tuple[float, bool]]] = defaultdict(list)
+    for s in scored:
+        if s.computed_at is not None and s.computed_at < calibrate.RAW_ERA_END:
+            pairs[s.retailer].append((s.confidence, s.hit))
+    return dict(pairs)
+
+
+# The served week's in-effect predictions, recorded in SQL so the predictions
+# writer can snapshot right before it prunes superseded runs (same semantics
+# as ledger_rows: active claims only, not already half-price that week).
+SNAPSHOT_SQL = """
+with w as (select max(week_start) as ws from specials),
+latest as (
+    select distinct on (p.product_id) p.*
+      from predictions p, w
+     where p.computed_at <= (w.ws + time '13:30') at time zone 'Australia/Sydney'
+     order by p.product_id, p.computed_at desc
+)
+insert into prediction_shown
+    (product_id, week_start, window_start, window_end, confidence, method, computed_at)
+select l.product_id, w.ws, l.predicted_window_start, l.predicted_window_end,
+       l.confidence, l.method, l.computed_at
+  from latest l, w
+ where l.predicted_window_end >= w.ws
+   and not exists (select 1 from specials s
+                    where s.product_id = l.product_id and s.week_start = w.ws
+                      and s.is_half_price)
+on conflict (product_id, week_start) do nothing
+"""
+
+
+def snapshot_served_week(cur) -> int:
+    cur.execute(SNAPSHOT_SQL)
+    return cur.rowcount
+
+
 # ---------------------------------------------------------------- DB layer
 
 def _load(cur) -> tuple[dict[str, list[Pred]], dict[str, set[date]], dict[str, str]]:
@@ -259,7 +317,7 @@ def _write_results(cur, scored: list[Scored], log: logging.Logger) -> dict:
 
 
 def run(*, db_url: str, log: logging.Logger, backfill: bool, snapshot: bool,
-        score: bool, write_db: bool) -> dict | None:
+        score: bool, write_db: bool, fit_calibration: bool = False) -> dict | None:
     with psycopg.connect(db_url, connect_timeout=30) as conn, conn.cursor() as cur:
         history, halves, retailer = _load(cur)
         served = _served_week(cur)
@@ -279,26 +337,24 @@ def run(*, db_url: str, log: logging.Logger, backfill: bool, snapshot: bool,
                 cur.execute("delete from prediction_shown where week_start < %s",
                             (current - timedelta(weeks=_RETENTION_WEEKS),))
         overall = None
-        if score:
+        if score or fit_calibration:
             # A dry run scores the rows it just built; otherwise score the stored ledger.
             ledger = rows if (rows and not write_db) else _load_ledger(cur)
-            scored = []
-            oldest_scored = current - timedelta(weeks=_MIN_AGE_WEEKS)
-            for claim in first_shown_claims(ledger):
-                if claim[1] > oldest_scored:
-                    continue
-                res = score_claim(claim, halves.get(claim[0], set()), current)
-                if res is None:
-                    continue
-                hit, width, naive = res
-                scored.append(Scored(claim[0], retailer.get(claim[0], "?"), claim[1],
-                                     claim[4], claim[5], hit, width, naive))
+            scored = score_ledger(ledger, halves, retailer, current)
+        if score:
             overall = summarize(scored)
             log.info("predictions_eval.as_shown n=%s hit=%s naive=%s width=%s ece=%s brier=%s",
                      overall.get("n"), overall.get("hit_rate"), overall.get("naive_hit_rate"),
                      overall.get("mean_width_weeks"), overall.get("ece"), overall.get("brier"))
             if write_db and scored:
                 _write_results(cur, scored, log)
+        if fit_calibration:
+            for ret, pairs in sorted(calibration_pairs(scored).items()):
+                blocks = calibrate.pav_fit(pairs)
+                log.info("predictions_eval.calibration retailer=%s n=%d blocks=%s", ret, len(pairs),
+                         [(b.upper, b.value, b.n) for b in blocks])
+                if write_db:
+                    calibrate.store(cur, ret, blocks)
         if write_db:
             conn.commit()
     return overall
@@ -311,6 +367,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--snapshot", action="store_true",
                         help="Record this promo week's shown predictions (idempotent).")
     parser.add_argument("--score", action="store_true", help="Score resolvable claims.")
+    parser.add_argument("--fit-calibration", action="store_true",
+                        help="Fit + store the per-retailer PAV map from raw-era claims.")
     parser.add_argument("--write-db", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
@@ -322,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("SUPABASE_DB_URL not set (env or .env file)")
         return 2
     run(db_url=db_url, log=log, backfill=args.backfill, snapshot=args.snapshot,
-        score=args.score, write_db=args.write_db)
+        score=args.score, write_db=args.write_db, fit_calibration=args.fit_calibration)
     return 0
 
 
