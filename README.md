@@ -125,10 +125,31 @@ symmetric mean +/- sd window sits too late for a gap distribution that
 peaks at two weeks. These as-shown numbers are what the app now publishes
 (`accuracy_stats`, rescored daily); the replay still feeds the per-product
 last-6 tally. A replacement model has to beat the naive guess before it
-ships. Meanwhile the confidence the app shows is calibrated: a
-per-retailer isotonic (PAV) map from each raw score to the hit rate
-actually observed for it (`src/eval/calibrate.py`), so "60% confident"
-means roughly 6 in 10 such calls landed.
+ships. The confidence the app shows is calibrated: a per-retailer
+isotonic (PAV) map from each raw score to the hit rate actually observed
+for it (`src/eval/calibrate.py`), so "60% confident" means roughly 6 in 10
+such calls landed.
+
+**Model v2 (`hazard_v2`, `src/prediction/hazard.py`)** now serves the app.
+It rebuilds one consistent weekly half-price series per product from the
+dump's price history, fits a retailer-wide gap distribution (Kaplan-Meier,
+open gaps censored), shrinks each product's own gaps toward it, and turns
+"weeks since the last sale started" into a probability for each of the
+next 12 promo weeks (blended with the product's recent sale frequency).
+The shown window is the best 1-3 consecutive weeks; its calibrated mass is
+the confidence. It is gated weekly on a walk-forward holdout (20 weeks):
+
+| Holdout 2026-09-26 | Coles | Woolworths |
+|---|---|---|
+| v2 hit rate at its ~2.9-week window | 43.3% | 36.3% |
+| naive guess, same width | 41.6% | 35.5% |
+| at the old model's width (~4.5 wk): v2 / old / naive | 58.5 / 58.8 / 57.6% | 52.3 / 52.8 / 52.4% |
+| calibration error (ECE) | 0.048 | 0.041 |
+
+At equal width every approach lands within about a point: timing beyond
+"it comes around every few weeks" is only weakly predictable. v2 ships for
+honest probabilities, narrower always-forward windows and per-week
+probabilities (see ADR-0003 in the app repo).
 
 ## Cross-store matching
 
@@ -194,6 +215,8 @@ src/
 ├── backtest.py                  replay backtest -> per-product last-6 tally
 ├── eval/predictions_eval.py     as-shown scoring -> prediction_shown ledger + accuracy_stats
 ├── eval/calibrate.py           PAV calibration: raw score -> observed hit rate
+├── prediction/series.py        weekly half-price series per product from dump history
+├── prediction/hazard.py        prediction v2: gap model, walk-forward gate, daily predictions
 ├── match_counterparts.py        cross-store product matcher -> product_aliases
 ├── send_alerts.py               weekly watchlist push digests (Expo)
 ├── env.py                       shared .env loading
