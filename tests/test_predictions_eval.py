@@ -19,8 +19,8 @@ class TestLedger:
     def test_in_effect_is_the_latest_computed_before_the_cutoff(self):
         early = _pred(date(2026, 8, 5), date(2026, 8, 18), at=datetime(2026, 7, 19, tzinfo=UTC))
         late = _pred(date(2026, 8, 12), date(2026, 8, 25), at=datetime(2026, 7, 26, tzinfo=UTC))
-        # Computed after Wed 29 Jul 13:30 Sydney -> not what users saw that week.
-        after = _pred(date(2026, 9, 2), date(2026, 9, 15), at=datetime(2026, 7, 29, 5, 0, tzinfo=UTC))
+        # Computed after Wed 29 Jul 15:00 Sydney (05:30Z) -> not what users saw as the week began.
+        after = _pred(date(2026, 9, 2), date(2026, 9, 15), at=datetime(2026, 7, 29, 5, 30, tzinfo=UTC))
         assert pe.in_effect([early, late, after], pe.shown_cutoff(W)) is late
 
     def test_expired_and_already_half_claims_are_not_recorded(self):

@@ -51,8 +51,9 @@ from src.scrapers.base import configure_logging
 from src.weeks import SYDNEY, current_promo_week, promo_week_start
 
 # The in-effect cutoff for a promo week: a prediction computed after this
-# (Sydney time, on the Wednesday) wasn't what users saw at the week's start.
-_SHOWN_AT = time(13, 30)
+# (Sydney time, on the Wednesday) wasn't what users saw as the week began.
+# 15:00 = after the midday roll + its 13:45 retry, which recompute predictions.
+_SHOWN_AT = time(15, 0)
 _RETENTION_WEEKS = 26
 # Only claims first shown at least this long ago are scored, so every window
 # from those weeks has had time to finish. Scoring newer weeks would keep only
@@ -217,7 +218,7 @@ with w as (select max(week_start) as ws from specials),
 latest as (
     select distinct on (p.product_id) p.*
       from predictions p, w
-     where p.computed_at <= (w.ws + time '13:30') at time zone 'Australia/Sydney'
+     where p.computed_at <= (w.ws + time '15:00') at time zone 'Australia/Sydney'
      order by p.product_id, p.computed_at desc
 )
 insert into prediction_shown
@@ -229,7 +230,11 @@ select l.product_id, w.ws, l.predicted_window_start, l.predicted_window_end,
    and not exists (select 1 from specials s
                     where s.product_id = l.product_id and s.week_start = w.ws
                       and s.is_half_price)
-on conflict (product_id, week_start) do nothing
+on conflict (product_id, week_start) do update set
+    window_start = excluded.window_start, window_end = excluded.window_end,
+    confidence = excluded.confidence, method = excluded.method,
+    computed_at = excluded.computed_at
+where excluded.computed_at > prediction_shown.computed_at
 """
 
 
@@ -271,7 +276,11 @@ def _upsert_ledger(cur, rows: list[tuple]) -> None:
                     (product_id, week_start, window_start, window_end, confidence,
                      method, computed_at)
                 values {ph}
-                on conflict (product_id, week_start) do nothing""",
+                on conflict (product_id, week_start) do update set
+                    window_start = excluded.window_start, window_end = excluded.window_end,
+                    confidence = excluded.confidence, method = excluded.method,
+                    computed_at = excluded.computed_at
+                where excluded.computed_at > prediction_shown.computed_at""",
             [v for r in batch for v in r],
         )
 
