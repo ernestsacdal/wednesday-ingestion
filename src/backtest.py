@@ -180,8 +180,16 @@ def write_accuracy(
     tiers: dict[str, tuple[int, int]],
     *,
     log: logging.Logger,
+    stats: bool = False,
 ) -> None:
-    """Replace prediction_accuracy + accuracy_stats with this run's numbers."""
+    """Replace prediction_accuracy (the per-product last-6 replay dots).
+
+    accuracy_stats — the hit rates the app quotes — now comes from the as-shown
+    scorer (src/eval/predictions_eval.py): this replay scored only the first
+    window after each historical sale and overstated what users saw (73.5% vs
+    ~52% for high confidence). ``stats=True`` restores the old writer as a
+    rollback.
+    """
     now = datetime.now(timezone.utc)
     with psycopg.connect(db_url, connect_timeout=30) as conn:
         with conn.cursor() as cur:
@@ -204,15 +212,16 @@ def write_accuracy(
                     """,
                     flat,
                 )
-            cur.execute("delete from accuracy_stats")
-            for tier, (tested, hits) in tiers.items():
-                cur.execute(
-                    """
-                    insert into accuracy_stats (tier, windows_tested, hits, computed_at)
-                    values (%s, %s, %s, %s)
-                    """,
-                    (tier, tested, hits, now),
-                )
+            if stats:
+                cur.execute("delete from accuracy_stats")
+                for tier, (tested, hits) in tiers.items():
+                    cur.execute(
+                        """
+                        insert into accuracy_stats (tier, windows_tested, hits, computed_at)
+                        values (%s, %s, %s, %s)
+                        """,
+                        (tier, tested, hits, now),
+                    )
         conn.commit()
     log.info("backtest.written products=%d tiers=%d", len(results), len(tiers))
 
@@ -220,7 +229,10 @@ def write_accuracy(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="backtest")
     parser.add_argument("--write-db", action="store_true",
-                        help="Persist results to prediction_accuracy + accuracy_stats.")
+                        help="Persist the per-product replay to prediction_accuracy.")
+    parser.add_argument("--stats", action="store_true",
+                        help="Rollback only: also overwrite accuracy_stats with replay rates "
+                             "(normally written by src.eval.predictions_eval).")
     parser.add_argument("--verbose", "-v", action="store_true")
     args = parser.parse_args(argv)
     log = configure_logging(verbose=args.verbose)
@@ -235,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
     results = run_backtest(db_url, log=log)
     tiers = summarize(results, log)
     if args.write_db:
-        write_accuracy(db_url, results, tiers, log=log)
+        write_accuracy(db_url, results, tiers, log=log, stats=args.stats)
     return 0
 
 
