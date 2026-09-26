@@ -36,6 +36,7 @@ from pathlib import Path
 from src.models import (
     ConfidenceTier, Prediction, PredictionRunSummary, Retailer, WeeklySpecial,
 )
+from src.eval import calibrate
 from src.scrapers.base import configure_logging
 from src.weeks import sydney_today
 
@@ -99,9 +100,29 @@ def _load_specials_from_json(path: Path, log: logging.Logger) -> list[WeeklySpec
     return specials
 
 
-def _key(s: WeeklySpecial) -> tuple[Retailer, str]:
-    """Per-product grouping key. Names normalised lightly to dedup near-dupes."""
-    return s.retailer, s.product_name.strip()
+def _key(s: WeeklySpecial) -> tuple:
+    """Per-product grouping key: products.id when known.
+
+    Grouping by (retailer, name) merged distinct same-name products (2,847
+    such groups) into one sale history and one shared prediction. The name
+    key remains only for the JSON-dump path, which has no product ids.
+    """
+    if s.product_id:
+        return ("id", s.product_id)
+    return ("name", s.retailer, s.product_name.strip())
+
+
+# The app's verdict thresholds (mobile/src/lib/predictions.ts verdictTier):
+# the stored tier must mean the same thing as the words the app prints.
+APP_TIERS = (("high", 0.70), ("medium", 0.50), ("low", 0.30))
+
+
+def tier_for(confidence: float) -> str | None:
+    """Tier by the app's thresholds; below 0.30 the app says "just watching" (null)."""
+    for name, floor in APP_TIERS:
+        if confidence >= floor:
+            return name
+    return None
 
 
 def _derive_intervals(entries: list[tuple[date, int | None]]) -> list[int]:
@@ -220,6 +241,7 @@ def compute_predictions(
     min_cycles: int = DEFAULT_MIN_CYCLES,
     today: date | None = None,
     log: logging.Logger | None = None,
+    calibration: dict | None = None,
 ) -> tuple[list[Prediction], PredictionRunSummary]:
     """Group specials by product, compute interval stats, emit predictions.
 
@@ -234,18 +256,22 @@ def compute_predictions(
     today = today or _today()
     started = datetime.now(timezone.utc)
 
-    # Group: (retailer, name) -> [(sale_date, interval_weeks_to_prior_sale_or_None)]
-    by_product: dict[tuple[Retailer, str], list[tuple[date, int | None]]] = defaultdict(list)
+    # Group per product -> [(sale_date, interval_weeks_to_prior_sale_or_None)]
+    by_product: dict[tuple, list[tuple[date, int | None]]] = defaultdict(list)
+    identity: dict[tuple, tuple[Retailer, str, str | None]] = {}
     for s in specials:
         if not s.is_half_price:
             continue
-        by_product[_key(s)].append((s.week_start, s.last_halfprice_weeks_ago))
+        key = _key(s)
+        by_product[key].append((s.week_start, s.last_halfprice_weeks_ago))
+        identity.setdefault(key, (s.retailer, s.product_name.strip(), s.product_id))
 
     predictions: list[Prediction] = []
     gated_out = 0
     now = datetime.now(timezone.utc)
 
-    for (retailer, name), entries in by_product.items():
+    for key, entries in by_product.items():
+        retailer, name, product_id = identity[key]
         intervals = _derive_intervals(entries)
         last_sale = max(d for (d, _w) in entries)
         result = _predict_for_product(intervals, last_sale, today=today, min_cycles=min_cycles)
@@ -256,15 +282,21 @@ def compute_predictions(
         # Confidence: more cycles = better, less dispersion = better.
         cycle_score = min(len(intervals) / 8.0, 1.0)
         dispersion_score = 1.0 - min(stddev_w / max(mean_w, 1.0), 1.0)
-        confidence = round(min(MAX_CONFIDENCE, 0.5 * cycle_score + 0.5 * dispersion_score), 2)
-        tier = _confidence_tier(confidence)
-        # Honesty gate ("warming up"): fewer than 3 observed cycles isn't enough
-        # evidence for a medium/high claim no matter what the score says — cap at
-        # low until the cycle history is real. With ~7 weeks of data this keeps
-        # every prediction honestly low-confidence; medium/high emerge only once
-        # products have ≥3 real cycles.
-        if len(intervals) < 3 and tier != "low":
-            tier = "low"
+        raw = round(min(MAX_CONFIDENCE, 0.5 * cycle_score + 0.5 * dispersion_score), 2)
+        if calibration is not None:
+            # Honest probability: the hit rate actually observed for this raw
+            # score at this retailer (src/eval/calibrate.py). Replaces the old
+            # "warming up" cap — few-cycle products score low raw, and the map
+            # prices that in from real outcomes.
+            confidence = calibrate.apply(calibration.get(retailer, []), raw)
+            tier = tier_for(confidence)
+        else:
+            confidence = raw
+            tier = _confidence_tier(confidence)
+            # Honesty gate ("warming up") for uncalibrated runs: fewer than 3
+            # observed cycles can't support a medium/high claim.
+            if len(intervals) < 3 and tier != "low":
+                tier = "low"
         predictions.append(Prediction(
             retailer=retailer,
             product_name=name,
@@ -278,6 +310,8 @@ def compute_predictions(
             cycle_count=len(intervals),
             last_sale_observed=last_sale,
             computed_at=now,
+            product_id=product_id,
+            raw_confidence=raw,
             rationale=_build_rationale(
                 cycle_count=len(intervals),
                 mean_w=mean_w,
@@ -338,6 +372,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", metavar="DIR", help="Directory to write predictions JSON (created if missing)")
     parser.add_argument("--min-cycles", type=int, default=DEFAULT_MIN_CYCLES,
                         help=f"Minimum historical intervals to emit a prediction (default {DEFAULT_MIN_CYCLES})")
+    parser.add_argument("--no-calibration", action="store_true",
+                        help="Write raw heuristic scores (rollback); default applies the latest "
+                             "stored per-retailer calibration map for DB runs.")
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable DEBUG logging")
     args = parser.parse_args(argv)
 
@@ -371,7 +408,19 @@ def main(argv: list[str] | None = None) -> int:
         log.error("predict.no_specials_in_input")
         return 1
 
-    predictions, summary = compute_predictions(specials, min_cycles=args.min_cycles, log=log)
+    calibration = None
+    if args.from_db and not args.no_calibration:
+        import psycopg
+        with psycopg.connect(db_url, connect_timeout=15) as conn, conn.cursor() as cur:
+            calibration = calibrate.load_latest(cur) or None
+        if calibration is None:
+            log.warning("predict.no_calibration_map — writing raw scores; fit one with "
+                        "python -m src.eval.predictions_eval --fit-calibration --write-db")
+        else:
+            log.info("predict.calibrated retailers=%s", sorted(calibration))
+
+    predictions, summary = compute_predictions(specials, min_cycles=args.min_cycles, log=log,
+                                               calibration=calibration)
 
     # Compact terminal preview — most actionable items first.
     print(f"\nTop 10 highest-confidence predictions:")
@@ -381,7 +430,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"  [{p.retailer[:4]:<4}] {name:<45} "
             f"-> {p.predicted_window_start.isoformat()}..{p.predicted_window_end.isoformat()} "
-            f"({p.confidence_tier:<6} {p.confidence:.2f}, n={p.cycle_count})"
+            f"({p.confidence_tier or 'watch':<6} {p.confidence:.2f}, n={p.cycle_count})"
         )
 
     if args.output:

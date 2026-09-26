@@ -17,7 +17,7 @@ ScrapeSource = Literal[
     "hotprices", "user_submission"
 ]
 ScrapeStatus = Literal["success", "partial", "failed", "no_data"]
-PredictionMethod = Literal["statistical", "prophet"]
+PredictionMethod = Literal["statistical", "prophet", "hazard_v2"]
 ConfidenceTier = Literal["low", "medium", "high"]
 
 
@@ -58,6 +58,9 @@ class WeeklySpecial:
     brand: str | None = None
     barcode: str | None = None
     size: str | None = None
+    # products.id when the row came from the DB (the predictor groups by it:
+    # distinct products can share a name — 2,847 such groups).
+    product_id: str | None = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -135,8 +138,8 @@ class Prediction:
     product_name: str
     predicted_window_start: date
     predicted_window_end: date
-    confidence: float            # 0.0 to 1.0
-    confidence_tier: ConfidenceTier
+    confidence: float            # 0.0 to 1.0 (calibrated when a map is supplied)
+    confidence_tier: ConfidenceTier | None
     method: PredictionMethod
     mean_interval_weeks: float
     stddev_weeks: float
@@ -144,6 +147,8 @@ class Prediction:
     last_sale_observed: date     # most recent half-price we saw
     computed_at: datetime
     rationale: str               # plain-English explanation for the prediction card
+    product_id: str | None = None        # set for DB-sourced runs
+    raw_confidence: float | None = None  # the heuristic score before calibration
 
     def to_dict(self) -> dict:
         d = asdict(self)

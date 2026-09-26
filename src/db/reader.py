@@ -41,6 +41,7 @@ def load_specials_from_db(
     """
     sql = """
         select
+            p.id::text,
             p.retailer,
             p.name,
             coalesce(p.category, 'Uncategorised') as category,
@@ -62,7 +63,7 @@ def load_specials_from_db(
             rows = cur.fetchall()
 
     for (
-        retailer, name, category, regular_cents, sale_cents,
+        product_id, retailer, name, category, regular_cents, sale_cents,
         discount_pct, is_half, week_start, week_end, source,
     ) in rows:
         specials.append(WeeklySpecial(
@@ -83,6 +84,7 @@ def load_specials_from_db(
             source=source,
             source_url="",
             scraped_at=datetime.now(timezone.utc),
+            product_id=product_id,
         ))
 
     log.info("predict.db.loaded specials=%d", len(specials))

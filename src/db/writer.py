@@ -277,29 +277,32 @@ def write_predictions_to_db(
     db_url: str,
     log: logging.Logger,
 ) -> PredictionsWriteResult:
-    """Insert prediction rows into the predictions table.
+    """Insert this run's predictions, then keep ONLY this run.
 
-    Each prediction is looked up by (retailer, name) to find product_id, then
-    inserted. Unique (product_id, computed_at) prevents duplicates within the
-    same run; cross-run dedup is implicit because computed_at differs.
+    Predictions carry their products.id (DB-sourced runs); the old
+    (retailer, name) lookup — last-wins across same-name products — remains
+    only as a fallback for the JSON-dump path. In the same transaction the
+    served week's shown predictions are snapshotted into the prediction_shown
+    ledger (the evaluation history) and every superseded run is deleted: the
+    app reads the latest row per product, and a product this run no longer
+    predicts should show "not enough data", not a months-old window.
     """
     inserted = 0
     skipped_unmatched = 0
 
     with psycopg.connect(db_url, connect_timeout=15) as conn:
         with conn.cursor() as cur:
-            # Build a (retailer, name) -> product_id lookup once.
-            cur.execute("select id::text, retailer, name from products")
-            lookup: dict[tuple[str, str], str] = {
-                (retailer, name): pid for pid, retailer, name in cur.fetchall()
-            }
+            lookup: dict[tuple[str, str], str] = {}
+            if any(p.product_id is None for p in predictions):
+                cur.execute("select id::text, retailer, name from products")
+                lookup = {(retailer, name): pid for pid, retailer, name in cur.fetchall()}
 
             # Build the insertable rows (skipping any prediction whose product
             # isn't in the DB), then write them in multi-row batches — row-by-row
             # over a high-latency pooler would be minutes for thousands of rows.
             rows = []
             for p in predictions:
-                product_id = lookup.get((p.retailer, p.product_name.strip()))
+                product_id = p.product_id or lookup.get((p.retailer, p.product_name.strip()))
                 if product_id is None:
                     skipped_unmatched += 1
                     continue
@@ -326,6 +329,14 @@ def write_predictions_to_db(
                     flat,
                 )
                 inserted += cur.rowcount
+
+            if rows:
+                from src.eval.predictions_eval import snapshot_served_week
+                snapshotted = snapshot_served_week(cur)
+                run_at = min(r[9] for r in rows)
+                cur.execute("delete from predictions where computed_at < %s", (run_at,))
+                log.info("predict.db.pruned superseded=%d (ledger snapshot +%d)",
+                         cur.rowcount, snapshotted)
         conn.commit()
 
     log.info(
