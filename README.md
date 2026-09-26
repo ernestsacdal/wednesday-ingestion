@@ -125,7 +125,10 @@ symmetric mean +/- sd window sits too late for a gap distribution that
 peaks at two weeks. These as-shown numbers are what the app now publishes
 (`accuracy_stats`, rescored daily); the replay still feeds the per-product
 last-6 tally. A replacement model has to beat the naive guess before it
-ships.
+ships. Meanwhile the confidence the app shows is calibrated: a
+per-retailer isotonic (PAV) map from each raw score to the hit rate
+actually observed for it (`src/eval/calibrate.py`), so "60% confident"
+means roughly 6 in 10 such calls landed.
 
 ## Cross-store matching
 
@@ -190,6 +193,7 @@ src/
 ├── audit_woolies.py             served Woolworths set vs the live Half Price node
 ├── backtest.py                  replay backtest -> per-product last-6 tally
 ├── eval/predictions_eval.py     as-shown scoring -> prediction_shown ledger + accuracy_stats
+├── eval/calibrate.py           PAV calibration: raw score -> observed hit rate
 ├── match_counterparts.py        cross-store product matcher -> product_aliases
 ├── send_alerts.py               weekly watchlist push digests (Expo)
 ├── env.py                       shared .env loading
