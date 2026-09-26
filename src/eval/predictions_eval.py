@@ -59,6 +59,9 @@ _RETENTION_WEEKS = 26
 # from those weeks has had time to finish. Scoring newer weeks would keep only
 # their SHORT windows (the long ones haven't resolved) and bias hit rates low.
 _MIN_AGE_WEEKS = 8
+# accuracy_stats describes the SERVED model; its as-shown rates replace the
+# model's own holdout figures once this many of its claims have been scored.
+MIN_METHOD_CLAIMS = 1000
 _BATCH = 1000
 
 # The app's verdict thresholds (mobile/src/lib/predictions.ts verdictTier),
@@ -295,8 +298,18 @@ def _load_ledger(cur) -> list[tuple]:
     return cur.fetchall()
 
 
+def _served_method(cur) -> str | None:
+    cur.execute("select method from predictions order by computed_at desc limit 1")
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def _write_results(cur, scored: list[Scored], log: logging.Logger) -> dict:
     now = datetime.now(SYDNEY)
+    served = _served_method(cur)
+    own = [s for s in scored if s.method == served]
+    if len(own) >= MIN_METHOD_CLAIMS:
+        scored = own          # judge the served model on its own claims
     overall = summarize(scored)
     groups: dict[tuple[str | None, str | None], list[Scored]] = {(None, None): scored}
     for s in scored:
@@ -317,6 +330,12 @@ def _write_results(cur, scored: list[Scored], log: logging.Logger) -> dict:
              summ.get("brier"), json.dumps({"reliability": summ.get("reliability", [])})),
         )
     # accuracy_stats: what the product page quotes ("calls like this one landed X%").
+    # Only from the served model's own claims; until there are enough of them
+    # the model's evaluation (e.g. hazard --eval holdout) owns the table.
+    if len(own) < MIN_METHOD_CLAIMS:
+        log.info("predictions_eval.accuracy_stats_skipped served=%s own_claims=%d (<%d)",
+                 served, len(own), MIN_METHOD_CLAIMS)
+        return overall
     cur.execute("delete from accuracy_stats")
     tiers = {name: [s for s in scored if app_bucket(s.confidence) == name]
              for name, _floor in APP_BUCKETS}

@@ -422,6 +422,17 @@ def load_series(db_url: str, log: logging.Logger):
     return series, retailer_of, last_seen, today_week
 
 
+def predictions_eval_owns_stats(cur) -> bool:
+    """True once the as-shown scorer has enough v2 claims to publish its own rates."""
+    from src.eval.predictions_eval import MIN_METHOD_CLAIMS
+    cur.execute("""select n from prediction_eval
+                    where eval_kind = 'as_shown' and method = %s
+                      and retailer is null and bucket is null
+                    order by computed_at desc limit 1""", (METHOD,))
+    row = cur.fetchone()
+    return bool(row and row[0] >= MIN_METHOD_CLAIMS)
+
+
 def _fmt_report(report: dict) -> str:
     lines = []
     for r, rep in report["retailers"].items():
@@ -449,6 +460,24 @@ def run_eval(db_url: str, log: logging.Logger, *, write_db: bool, alpha: float =
         with psycopg.connect(db_url, connect_timeout=30) as conn, conn.cursor() as cur:
             for r, blocks in report["calibration"].items():
                 calibrate.store(cur, r, blocks, method=METHOD)
+            # accuracy_stats (the product page's "calls like this one landed X%")
+            # must describe the SERVED model: until enough v2 claims have been
+            # scored as shown, publish v2's calibrated holdout by the app's
+            # verdict thresholds. predictions_eval takes over once they have.
+            from src.eval.predictions_eval import APP_BUCKETS, app_bucket
+            holdout_set = set(holdout)
+            scored = [(calibrate.apply(report["calibration"].get(c.retailer, []), c.raw), c.hit)
+                      for c in cases if c.t in holdout_set]
+            tiers = {name: [h for conf, h in scored if app_bucket(conf) == name]
+                     for name, _floor in APP_BUCKETS}
+            tiers["overall"] = [h for _conf, h in scored]
+            if not predictions_eval_owns_stats(cur):
+                cur.execute("delete from accuracy_stats")
+                for tier, hits in tiers.items():
+                    cur.execute("insert into accuracy_stats (tier, windows_tested, hits, computed_at) "
+                                "values (%s, %s, %s, now())", (tier, len(hits), sum(hits)))
+                log.info("hazard.accuracy_stats from holdout %s",
+                         {t: f"{sum(h)}/{len(h)}" for t, h in tiers.items()})
             # The product page's "last 6" dots: v2's own replay.
             records = product_track_records(cases)
             now = datetime.now(timezone.utc)
