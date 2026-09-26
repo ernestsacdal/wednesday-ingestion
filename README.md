@@ -103,21 +103,29 @@ confidence ("warming up"), window half-widths are floored at +/-1 week,
 and confidence is capped at 0.95 — the model is never allowed to sound
 more certain than its data.
 
-The claim "this works" is measured, not asserted. `src/backtest.py`
-replays every product's sale history through the production predictor
-(walk-forward, first window after each sale, warming-up rules applied
-as-of prediction time) and scores whether the next sale actually landed
-in the predicted window:
+The claim "this works" is measured, not asserted — and the first way we
+measured it turned out to flatter the model. `src/backtest.py` replays each
+product's sale history (first window after each sale) and reported 73.5%
+high / 63.5% overall. Scored instead against the predictions users were
+actually SHOWN (`src/eval/predictions_eval.py`: each prediction judged from
+the week it first appeared, on the part of its window still ahead, only
+once that window has fully elapsed), the same model lands far lower — and
+below a naive guess of "half-price sometime in the next k promo weeks" with
+the same window width:
 
-| Confidence tier | Windows tested | Hit rate |
-|---|---|---|
-| High | ~10,700 | **73.5%** |
-| Medium | ~18,400 | 68.8% |
-| Low | ~14,800 | 49.6% |
-| Overall | ~44,000 | 63.5% |
+| Confidence (app buckets) | Predictions scored | Hit rate | Naive, same width |
+|---|---|---|---|
+| High (>= 0.70) | 9,531 | **52.3%** | 58.4% |
+| Medium (0.50-0.70) | 12,477 | 38.8% | 43.5% |
+| Low (0.30-0.50) | 11,355 | 34.8% | 41.2% |
+| Overall | 36,142 | 40.5% | 46.4% |
 
-The tiers order correctly, and the numbers are published inside the app
-(per-product last-6 tally plus the global rate), recomputed weekly.
+(Predictions first shown 17 Jun - 29 Jul 2026, measured 26 Sep 2026.) The
+symmetric mean +/- sd window sits too late for a gap distribution that
+peaks at two weeks. These as-shown numbers are what the app now publishes
+(`accuracy_stats`, rescored daily); the replay still feeds the per-product
+last-6 tally. A replacement model has to beat the naive guess before it
+ships.
 
 ## Cross-store matching
 
@@ -180,7 +188,8 @@ src/
 ├── weeks.py                     Sydney-local promo-week math (the one week convention)
 ├── truth.py                     ground-truth capture (truth_snapshots)
 ├── audit_woolies.py             served Woolworths set vs the live Half Price node
-├── backtest.py                  walk-forward predictor backtest -> accuracy tables
+├── backtest.py                  replay backtest -> per-product last-6 tally
+├── eval/predictions_eval.py     as-shown scoring -> prediction_shown ledger + accuracy_stats
 ├── match_counterparts.py        cross-store product matcher -> product_aliases
 ├── send_alerts.py               weekly watchlist push digests (Expo)
 ├── env.py                       shared .env loading
