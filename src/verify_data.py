@@ -185,6 +185,24 @@ CHECKS: list[Check] = [
         "select coalesce(extract(epoch from now() - max(computed_at)) / 86400, 999) from predictions",
         lambda v: v <= 9, "newest <= 9 days old",
     ),
+    # The predictions writer keeps only the latest run (superseded runs are
+    # pruned after the served week is snapshotted into prediction_shown), so
+    # the app never shows a stale window for a product the model dropped.
+    Check(
+        "predictions_single_run",
+        "select count(distinct computed_at) from predictions",
+        lambda v: v <= 2, "<= 2 runs kept (latest only; 2 tolerates a mid-write read)",
+    ),
+    # The as-shown evaluation ledger recorded this promo week's predictions.
+    # Warn only: it's evaluation history, not something users see.
+    Check(
+        "ledger_this_week",
+        """select count(*) from prediction_shown
+           where week_start = (select max(week_start) from specials)""",
+        lambda v: v >= 1_000, ">= 1,000 shown predictions recorded this week",
+        severity="warn",
+        active=live_deadline_passed,
+    ),
     Check(
         "predictions_floor",
         "select count(*) from predictions",
