@@ -158,7 +158,7 @@ _NOT_FOOD_RULES: list[tuple[str, tuple[str, ...]]] = [
         "immune support",
         # Supplement brands: only consulted when the code put the item in food.
         "swisse", "blackmores", "nature's way", "cenovis", "ostelin", "elevit",
-        "life space", "ultralife", "vitaceuticals",
+        "life space", "ultralife", "vitaceuticals", "living healthy",
     )),
 ]
 # ...except these, which really are food or drink.
