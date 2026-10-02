@@ -40,6 +40,12 @@ stamp="$log_dir/.ok-midday-roll"
 # DB host). Wait up to 3 minutes for DNS; with still no network, defer to the
 # next scheduled slot quietly — that isn't a failure worth a notification
 # (verify-live emails if no live run lands for 36h).
+# Hard cap per Python step: a Mac that sleeps mid-run can leave a socket
+# hanging with no timeout (26-27 Sep: the Coles step hung for hours). perl's
+# alarm is a portable timeout (macOS has no GNU timeout); it execs Python in
+# place, so the alarm kills Python itself, not caffeinate above it.
+STEP_TIMEOUT=900
+
 wait_for_network() {
     local i
     for i in $(seq 1 18); do
@@ -73,7 +79,7 @@ final=0
 run_step() {
     local name="$1"; shift
     echo "[$(date -Iseconds)] step=$name starting" >> "$log"
-    /usr/bin/caffeinate -i -s "$py" -X utf8 "$@" >> "$log" 2>&1
+    /usr/bin/caffeinate -i -s /usr/bin/perl -e 'alarm shift; exec @ARGV' "$STEP_TIMEOUT" "$py" -X utf8 "$@" >> "$log" 2>&1
     local code=$?
     echo "[$(date -Iseconds)] step=$name exit=$code" >> "$log"
     if [ "$code" -ne 0 ] && [ "$final" -eq 0 ]; then final=$code; fi

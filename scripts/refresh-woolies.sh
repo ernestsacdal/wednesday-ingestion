@@ -34,6 +34,12 @@ stamp="$log_dir/.ok-woolies-refresh"
 # DB host). Wait up to 3 minutes for DNS; with still no network, defer to the
 # next scheduled slot quietly — that isn't a failure worth a notification
 # (verify-live emails if no live run lands for 36h).
+# Hard cap per Python step: a Mac that sleeps mid-run can leave a socket
+# hanging with no timeout (26-27 Sep: the Coles step hung for hours). perl's
+# alarm is a portable timeout (macOS has no GNU timeout); it execs Python in
+# place, so the alarm kills Python itself, not caffeinate above it.
+STEP_TIMEOUT=900
+
 wait_for_network() {
     local i
     for i in $(seq 1 18); do
@@ -62,7 +68,7 @@ if ! wait_for_network; then
     exit 0
 fi
 echo "[$(date -Iseconds)] starting woolies live refresh" >> "$log"
-/usr/bin/caffeinate -i -s "$py" -X utf8 -m src.refresh_woolies_specials --verbose >> "$log" 2>&1
+/usr/bin/caffeinate -i -s /usr/bin/perl -e 'alarm shift; exec @ARGV' "$STEP_TIMEOUT" "$py" -X utf8 -m src.refresh_woolies_specials --verbose >> "$log" 2>&1
 code=$?
 [ "$code" -eq 0 ] && echo "$today" > "$stamp"
 echo "[$(date -Iseconds)] finished exit=$code" >> "$log"
