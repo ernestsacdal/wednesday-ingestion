@@ -139,3 +139,23 @@ class TestParseOneRecencyGuard:
     def test_missing_id_or_name_dropped(self):
         assert hp._parse_one({"name": "x", "priceHistory": []}, today=self.TODAY) is None
         assert hp._parse_one({"id": "1", "priceHistory": []}, today=self.TODAY) is None
+
+
+def test_keyword_fallback_covers_the_uncoded_coles_lines():
+    from src.scrapers.hotprices import _keyword_category as kw
+    assert kw("Bonds Womens Hipster Boyleg Brief Size 10") == "Clothing & Accessories"
+    assert kw("Bonds Bloody Cmfy Bikini Period Care Reusable Underwear") == "Period Care"
+    assert kw("Air Wick Pure Freshmatic Cherry Blossom Air Freshener") == "Cleaning Goods"
+    assert kw("Cuddly Sunshine Fresh Fabric Conditioner") == "Laundry"
+    assert kw("Dove Women Advanced Deodorant Roll On 72hr") == "Personal Care & Hygiene"
+    assert kw("Nice & Natural Nut Bars With Milk Choc Multipack") == "Healthy Snacks & Foods"
+    assert kw("Haribo Tangfastics") == "Confectionery"
+    assert kw("Swisse Beauty Collagen Glow 120 Tablets") == "Vitamins & Supplements"
+
+
+def test_keyword_fallback_stays_narrow():
+    from src.scrapers.hotprices import _keyword_category as kw
+    assert kw("Heinz Spicy BBQ Sauce Jalapeno") != "Outdoor Living"
+    assert kw("Dove Damage Therapy Volume Boost & Collagen Shampoo") != "Vitamins & Supplements"
+    assert kw("Strepsils Herbal Chesty Cough Lozenges") != "Clothing & Accessories"
+    assert kw("M&S Penny Bazaar Shortbread Tin") != "Stationery & Office Supplies"

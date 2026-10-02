@@ -87,22 +87,52 @@ _KEYWORD_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("Savoury Snacks", (
         "potato chips", "corn chips", "crisps", "popcorn", "pretzel",
         "doritos", "pringles", "cheezels", "twisties", "burger rings",
-        "grain waves", "rice crackers", "snack mix",
+        "grain waves", "grainwaves", "rice crackers", "snack mix", "cheetos",
+        "smith's", "smiths ", "double crunch", "hooleys",
     )),
+    # Before Confectionery: "nut bars ... with milk choc" is a snack bar.
+    ("Healthy Snacks & Foods", ("nut bar", "muesli bar", "protein bar")),
     ("Confectionery", (
         "chocolate", "lollies", "gummy", "gummi", "licorice", "liquorice",
-        "candy", "marshmallow", "fudge", "chewing gum",
+        "candy", "marshmallow", "fudge", "chewing gum", "choc block", "sharepack",
+        "jellies", "snakes", "haribo", "allen's", "sherbet", "sherbert",
     )),
-    ("Biscuits & Crackers", ("biscuit", "cookie", "cracker", "wafer")),
+    ("Biscuits & Crackers", ("biscuit", "cookie", "cracker", "wafer", "digestives", "snackright")),
     ("Soft Drinks", ("soft drink", "cola", "lemonade")),
     ("Energy Drinks", ("energy drink",)),
     ("Juice", ("juice",)),
     ("Yogurt", ("yoghurt", "yogurt")),
     ("Cheese", ("cheese block", "cheese slices", "shredded cheese", "cheese grated")),
     ("Milk", ("milk 1l", "milk 2l", "milk 3l", "long life milk", "uht milk")),
-    ("Laundry", ("laundry", "fabric softener", "stain remover")),
+    ("Meat & Seafood", ("salami", "pepperoni", "kabana")),
+    ("Pantry", ("vegetable oil", "sunflower oil", "canola oil", "olive oil")),
+    ("Laundry", (
+        "laundry", "fabric softener", "fabric conditioner", "fabric rinse",
+        "stain remover", "biozet",
+    )),
     ("Toilet Paper, Tissues & Paper Towels", ("toilet paper", "toilet tissue", "paper towel", "facial tissues")),
-    ("Cleaning Goods", ("dishwash", "disinfectant", "bleach", "toilet cleaner", "multipurpose cleaner", "surface spray")),
+    ("Cleaning Goods", (
+        "dishwash", "disinfectant", "bleach", "toilet cleaner", "toilet cleaning",
+        "cleaning tabs", "cleaning wipes", "multipurpose cleaner", "surface spray",
+        "air freshener", "air wick", "glade ", "ambi pur", "reed diffuser",
+    )),
+    ("Personal Care & Hygiene", ("deodorant", "antiperspirant")),
+    # Narrow on purpose: bare "collagen" also names shampoos and sheet masks.
+    ("Vitamins & Supplements", (
+        "multivitamin", "fish oil", "probiotic", "beauty collagen", "marine collagen",
+        "collagen tablets",
+    )),
+    ("Period Care", ("period care", "period undies", "period underwear")),
+    # Hosiery/underwear brands plus unambiguous garments; "brief" or "chesty"
+    # alone also match period undies and cough lozenges.
+    ("Clothing & Accessories", (
+        "bonds ", "razza ", "sheer relief", "explorer mens", "socks", "pantyhose",
+        "tights", "footlet", "anklet",
+    )),
+    ("Kitchenware & Storage", ("storer", "tellfresh", "storage bags", "tumbler", "ziploc")),
+    ("Hardware", ("batteries", "battery")),
+    ("Stationery & Office Supplies", ("ballpoint", "whiteboard marker")),
+    ("Outdoor Living", ("heat beads", "briquettes", "hot plate liners")),
 ]
 
 
