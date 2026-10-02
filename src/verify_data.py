@@ -252,6 +252,19 @@ CHECKS: list[Check] = [
                   / greatest(count(*), 1)) from products""",
         lambda v: v <= 40, "<= 40% (typical ~28%)",
     ),
+    # The set Home and its aisle filters browse. 2026-10-02: 36% Uncategorised
+    # until Woolworths' own hierarchy was mapped (woolies_taxonomy), ~1% after.
+    # Warn-only: a new Woolworths line can arrive unmapped.
+    Check(
+        "uncategorised_half_this_week",
+        """select round(100.0 * count(*) filter (where p.category = 'Uncategorised')
+                  / greatest(count(*), 1))
+             from specials s join products p on p.id = s.product_id
+            where s.week_start = (select max(week_start) from specials)
+              and s.is_half_price""",
+        lambda v: v <= 10, "<= 10% of this week's half-price set (typical ~1%)",
+        severity="warn",
+    ),
     # Coles accuracy vs the SaleFinder catalogue ground truth (src/audit_accuracy).
     # Recall floor — tolerant: passes (sentinel 100) until the probe first runs.
     Check(
