@@ -92,6 +92,23 @@ run_step dinners -m src.generate_recipes --seed --write-db --revalidate --verbos
 run_step predict -m src.prediction.hazard --write-db --verbose
 run_step ledger  -m src.eval.predictions_eval --snapshot --write-db --verbose
 
+# After a successful Wednesday roll, mark the website's cached product and
+# category pages stale so they show the new week on their next visit.
+revalidate_site() {
+    local secret
+    secret=$(grep -E '^SEO_REVALIDATE_SECRET=' "$repo/.env" 2>/dev/null | cut -d= -f2-)
+    [ -n "$secret" ] || return 0
+    if curl -fsS -m 20 -X POST -H "x-revalidate-secret: $secret" \
+        https://wednesday.ernestmikhail.com/api/revalidate >> "$log" 2>&1; then
+        echo "" >> "$log"; echo "[$(date -Iseconds)] website pages marked for refresh" >> "$log"
+    else
+        echo "[$(date -Iseconds)] website revalidate failed (pages refresh within a week anyway)" >> "$log"
+    fi
+}
+if [ "$final" -eq 0 ] && [ "$(TZ=Australia/Sydney date +%u)" = "3" ]; then
+    revalidate_site
+fi
+
 echo "[$(date -Iseconds)] finished exit=$final" >> "$log"
 [ "$final" -eq 0 ] && echo "$today" > "$stamp"
 if [ "$final" -ne 0 ]; then

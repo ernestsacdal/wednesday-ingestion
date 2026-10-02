@@ -561,7 +561,21 @@ def run_predict(db_url: str, log: logging.Logger, *, write_db: bool) -> int:
              dict(Counter(p.confidence_tier for p in preds)))
     if write_db:
         write_predictions_to_db(preds, db_url=db_url, log=log)
+        refresh_seo_products(db_url, log)
     return 0
+
+
+def refresh_seo_products(db_url: str, log: logging.Logger) -> None:
+    """Refresh the web pages' index (migration 0032) after the daily predictions.
+
+    Never fails the prediction run: the web pages keep yesterday's list."""
+    import psycopg
+    try:
+        with psycopg.connect(db_url, connect_timeout=30, autocommit=True) as conn:
+            conn.execute("refresh materialized view concurrently seo_products")
+        log.info("hazard.seo_products refreshed")
+    except Exception:  # noqa: BLE001
+        log.exception("hazard.seo_products_refresh_failed — web index keeps the previous list")
 
 
 def main(argv: list[str] | None = None) -> int:

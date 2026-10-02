@@ -105,6 +105,20 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m src.eval.predictions_eval --snapshot --score --write-db --verbose
 
+      # On Wednesdays (Sydney) the new promo week rolls: mark the website's cached
+      # product/category pages stale so they show it on their next visit.
+      # Best-effort — pages also refresh within a week on their own.
+      - name: Refresh the website's cached pages (Wednesdays)
+        env:
+          SEO_REVALIDATE_SECRET: ${{ secrets.SEO_REVALIDATE_SECRET }}
+        run: |
+          if [ -n "$SEO_REVALIDATE_SECRET" ] && [ "$(TZ=Australia/Sydney date +%u)" = "3" ]; then
+            curl -fsS -m 20 -X POST -H "x-revalidate-secret: $SEO_REVALIDATE_SECRET" \
+              https://wednesday.ernestmikhail.com/api/revalidate || echo "website revalidate failed"
+          else
+            echo "not Wednesday (Sydney) or no secret configured: skipping"
+          fi
+
       # The loud safety net: asserts data invariants (per-retailer current-week
       # floors, week freshness, no junk rows, derived-data freshness...) and
       # FAILS the run when any are violated — which triggers GitHub's failure
