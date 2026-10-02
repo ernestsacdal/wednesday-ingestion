@@ -565,17 +565,23 @@ def run_predict(db_url: str, log: logging.Logger, *, write_db: bool) -> int:
     return 0
 
 
-def refresh_seo_products(db_url: str, log: logging.Logger) -> None:
-    """Refresh the web pages' index (migration 0032) after the daily predictions.
+# Materialized views read by anon clients, refreshed after the daily predictions:
+# the web pages' index (0032) and Home's "Start your list" pool (0033).
+_DAILY_VIEWS = ("seo_products", "home_suggestions")
 
-    Never fails the prediction run: the web pages keep yesterday's list."""
+
+def refresh_seo_products(db_url: str, log: logging.Logger) -> None:
+    """Refresh the daily materialized views after the predictions are written.
+
+    Never fails the prediction run: each view keeps yesterday's rows."""
     import psycopg
-    try:
-        with psycopg.connect(db_url, connect_timeout=30, autocommit=True) as conn:
-            conn.execute("refresh materialized view concurrently seo_products")
-        log.info("hazard.seo_products refreshed")
-    except Exception:  # noqa: BLE001
-        log.exception("hazard.seo_products_refresh_failed — web index keeps the previous list")
+    for view in _DAILY_VIEWS:
+        try:
+            with psycopg.connect(db_url, connect_timeout=30, autocommit=True) as conn:
+                conn.execute(f"refresh materialized view concurrently {view}")
+            log.info("hazard.%s refreshed", view)
+        except Exception:  # noqa: BLE001
+            log.exception("hazard.%s_refresh_failed — keeps the previous rows", view)
 
 
 def main(argv: list[str] | None = None) -> int:
