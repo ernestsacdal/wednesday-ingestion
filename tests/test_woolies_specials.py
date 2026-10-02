@@ -12,7 +12,9 @@ def _tile(**over):
         "Name": "Fairy Platinum Dishwashing Tablets", "Stockcode": 154829,
         "Price": 23.0, "WasPrice": 46.0, "IsHalfPrice": True, "IsAvailable": True,
         "IsMarketProduct": False, "Brand": "Fairy", "Barcode": "8001090000000",
-        "PackageSize": "84 pack", "Department": "Cleaning",
+        "PackageSize": "84 pack",
+        "AdditionalAttributes": {"sapcategoryname": "CLEANSING",
+                                 "sapsubcategoryname": "DISHWASHING DETERGENT"},
     }
     tile.update(over)
     return tile
@@ -28,6 +30,7 @@ def test_maps_prices_key_and_attributes():
     assert sp.retailer_sku == "woolworths:154829"
     assert (sp.brand, sp.barcode, sp.size) == ("Fairy", "8001090000000", "84 pack")
     assert sp.is_half_price
+    assert sp.category == "Cleaning Goods"
 
 
 def test_half_flag_comes_from_woolworths_not_rounding():

@@ -34,6 +34,7 @@ import requests
 
 from src.models import ScrapeOutput, ScrapeRun, WeeklySpecial
 from src.scrapers.product_images import _BROWSER_HEADERS, build_image_session
+from src.scrapers.woolies_taxonomy import category_from_attributes
 from src.truth import TruthRow
 from src.weeks import current_promo_week
 
@@ -127,7 +128,8 @@ def _to_special(
     return WeeklySpecial(
         retailer="woolworths",
         product_name=name,
-        category=(p.get("Department") or "Uncategorised").strip() or "Uncategorised",
+        # Woolworths' own hierarchy (Department is never set on these tiles).
+        category=category_from_attributes(p.get("AdditionalAttributes")),
         regular_price_cents=reg_cents,
         sale_price_cents=sale_cents,
         discount_pct=discount_pct,
