@@ -28,6 +28,11 @@ from datetime import timedelta
 
 import psycopg
 
+from src.db.bulk_writer import (
+    CATEGORY_FILL_SQL,
+    CATEGORY_OVERWRITE_SQL,
+    category_is_authoritative,
+)
 from src.env import load_dotenv
 from src.scrapers.base import configure_logging
 from src.weeks import sydney_today
@@ -60,6 +65,9 @@ def _upsert_products(cur, products, retailer, log) -> None:
             p.regular_cents, p.image_url, p.source_product_url,
         )
     rows = list(by_sku.values())
+    # The dump is never authoritative for a Woolworths category (bulk_writer).
+    category_sql = (CATEGORY_OVERWRITE_SQL if category_is_authoritative(retailer, "hotprices")
+                    else CATEGORY_FILL_SQL)
     total = 0
     for batch in _chunks(rows, _PRODUCT_BATCH):
         ph = ",".join(["(%s,%s,%s,%s,%s,%s::text,%s,now(),now())"] * len(batch))
@@ -80,10 +88,7 @@ def _upsert_products(cur, products, retailer, log) -> None:
                     then excluded.regular_price_cents else products.regular_price_cents end,
                 name = case
                     when excluded.name <> '' then excluded.name else products.name end,
-                -- A real category always beats the 'Uncategorised' placeholder.
-                category = case
-                    when excluded.category is not null and excluded.category <> 'Uncategorised'
-                    then excluded.category else products.category end,
+                category = {category_sql},
                 image_url = coalesce(products.image_url, excluded.image_url),
                 source_product_url = coalesce(products.source_product_url, excluded.source_product_url),
                 image_fetched_at = case

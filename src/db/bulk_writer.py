@@ -72,9 +72,41 @@ def _insert_scrape_run(cur: psycopg.Cursor, output: ScrapeOutput, items: int) ->
     return cur.fetchone()[0]
 
 
+# Category precedence. Woolworths' own hierarchy (the live browse API, source
+# 'woolies_catalogue', mapped by scrapers/woolies_taxonomy) is authoritative;
+# the hotprices dump's code labels misfile some Woolworths lines, so for
+# Woolworths the dump only fills a missing category — otherwise the daily
+# cloud catalogue load would flip vitamins back to 'Confectionery'. Coles has
+# no richer source, so its dump label still overwrites.
+# A real category always beats the 'Uncategorised' placeholder either way.
+CATEGORY_OVERWRITE_SQL = """case
+                    when excluded.category is not null and excluded.category <> 'Uncategorised'
+                    then excluded.category else products.category end"""
+CATEGORY_FILL_SQL = """case
+                    when (products.category is null or products.category = 'Uncategorised')
+                         and excluded.category is not null and excluded.category <> 'Uncategorised'
+                    then excluded.category else products.category end"""
+
+
+def category_is_authoritative(retailer: str, source: str | None) -> bool:
+    """Whether this row's category may replace an existing real category."""
+    return retailer != "woolworths" or source == "woolies_catalogue"
+
+
 def _upsert_products(cur: psycopg.Cursor, specials: list[WeeklySpecial]) -> dict[tuple[str, str], str]:
     """Bulk upsert products; return {(retailer, retailer_sku) -> id}."""
+    ids: dict[tuple[str, str], str] = {}
+    for authoritative in (True, False):
+        part = [s for s in specials
+                if category_is_authoritative(s.retailer, s.source) == authoritative]
+        ids.update(_upsert_product_rows(cur, part, authoritative=authoritative))
+    return ids
+
+
+def _upsert_product_rows(cur: psycopg.Cursor, specials: list[WeeklySpecial], *,
+                         authoritative: bool) -> dict[tuple[str, str], str]:
     now = datetime.now(timezone.utc)
+    category_sql = CATEGORY_OVERWRITE_SQL if authoritative else CATEGORY_FILL_SQL
     ids: dict[tuple[str, str], str] = {}
     for batch in _chunks(specials, _PRODUCT_BATCH):
         rows = []
@@ -94,10 +126,7 @@ def _upsert_products(cur: psycopg.Cursor, specials: list[WeeklySpecial]) -> dict
             values {ph}
             on conflict (retailer, retailer_sku) do update set
                 name = excluded.name,
-                -- A real category always beats the 'Uncategorised' placeholder.
-                category = case
-                    when excluded.category is not null and excluded.category <> 'Uncategorised'
-                    then excluded.category else products.category end,
+                category = {category_sql},
                 regular_price_cents = greatest(products.regular_price_cents, excluded.regular_price_cents),
                 image_url = coalesce(products.image_url, excluded.image_url),
                 image_fetched_at = case
