@@ -144,10 +144,57 @@ def _keyword_category(name: str) -> str:
     return "Uncategorised"
 
 
+# Some dump codes mix groceries with pharmacy and toiletry lines: Coles code
+# 106 ('Meat & Seafood') holds fish oil, sunscreen and hand wash beside the
+# salmon (~40% of a 2026-10-02 sample). A narrow name check moves those out of
+# FOOD labels only, so "everyday first" ordering isn't led by vitamins.
+_NOT_FOOD_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("Skin Care", ("sunscreen", "spf ")),
+    ("Personal Care & Hygiene", ("hand wash", "handwash", "body wash", "body bar", "shower gel")),
+    ("Vitamins & Supplements", (
+        "multivitamin", "vitamin c ", "vitamin d", "vitamin b", "fish oil", "probiotic",
+        "magnesium", "glucosamine", "omega-3", "omega 3", "collagen", "creatine",
+        "kids gummies", "vita gummies", "capsules", " tablets", "spirulina", "kava",
+        "immune support",
+        # Supplement brands: only consulted when the code put the item in food.
+        "swisse", "blackmores", "nature's way", "cenovis", "ostelin", "elevit",
+        "life space", "ultralife", "vitaceuticals",
+    )),
+]
+# ...except these, which really are food or drink.
+_NOT_FOOD_EXCEPT = (
+    "coffee", "espresso", "nespresso", "tea ", "water", "drink", "stock",
+    "yoghurt", "yogurt", "sweetener",
+)
+_FOOD_LABELS = frozenset({
+    "Pantry", "Breakfast & Spreads", "Canned Goods", "Pasta & Noodles", "Rice & Grains",
+    "Cooking & Baking Needs", "Condiments & Dressings", "Soup", "Packaged Meals",
+    "International Foods", "Savoury Snacks", "Confectionery", "Biscuits & Crackers",
+    "Healthy Snacks & Foods", "Bakery Snacks", "Ready Meals & Snacks",
+    "Dairy, Eggs & Fridge", "Milk", "Eggs", "Yogurt", "Cheese", "Butter & Margarine",
+    "Cream & Desserts", "Dips & Cold Packaged Meats", "Fresh Pasta & Sauces", "Drinks",
+    "Juice", "Chilled Juice", "Soft Drinks", "Mineral Water", "Energy Drinks", "Iced Tea",
+    "Cordials", "Syrups", "Sports Drinks", "Meat & Seafood", "Beef & Veal", "Lamb", "Pork",
+    "Poultry", "Seafood", "Sausages, Burgers & Meatballs", "Marinated & Prepped Meats",
+})
+
+
+def _not_food_label(name: str) -> str | None:
+    lowered = name.lower()
+    if any(x in lowered for x in _NOT_FOOD_EXCEPT):
+        return None
+    for label, needles in _NOT_FOOD_RULES:
+        if any(n in lowered for n in needles):
+            return label
+    return None
+
+
 def category_label(code, name: str = "") -> str:
     """Human category for a dump code, keyword fallback when uncoded."""
     label = _CATEGORY_LABELS.get(str(code))
     if label is not None:
+        if label in _FOOD_LABELS and name:
+            return _not_food_label(name) or label
         return label
     return _keyword_category(name) if name else "Uncategorised"
 

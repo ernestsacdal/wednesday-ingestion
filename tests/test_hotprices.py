@@ -159,3 +159,14 @@ def test_keyword_fallback_stays_narrow():
     assert kw("Dove Damage Therapy Volume Boost & Collagen Shampoo") != "Vitamins & Supplements"
     assert kw("Strepsils Herbal Chesty Cough Lozenges") != "Clothing & Accessories"
     assert kw("M&S Penny Bazaar Shortbread Tin") != "Stationery & Office Supplies"
+
+
+def test_mixed_food_codes_shed_pharmacy_and_toiletry_lines():
+    # Coles code 106 is labelled 'Meat & Seafood' but also holds these.
+    from src.scrapers.hotprices import category_label
+    assert category_label("106", "Blackmores Fish Oil 1000mg Omega-3 Capsules") == "Vitamins & Supplements"
+    assert category_label("106", "Cancer Council Sport Tinted Sunscreen Zinc SPF 50+") == "Skin Care"
+    assert category_label("106", "Palmolive Naturals Foaming Hand Wash Vanilla & Berry") == "Personal Care & Hygiene"
+    assert category_label("106", "Tassal Tasmanian Smoked Salmon") == "Meat & Seafood"
+    # Real food that mentions a supplement word stays put.
+    assert category_label("106", "Activia Probiotic Yoghurt Mango 4x125g") == "Meat & Seafood"
