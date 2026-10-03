@@ -149,7 +149,7 @@ def _keyword_category(name: str) -> str:
 # salmon (~40% of a 2026-10-02 sample). A narrow name check moves those out of
 # FOOD labels only, so "everyday first" ordering isn't led by vitamins.
 _NOT_FOOD_RULES: list[tuple[str, tuple[str, ...]]] = [
-    ("Skin Care", ("sunscreen", "spf ")),
+    ("Skin Care", ("sunscreen", "spf ", "spf50", "lotion", "after sun", "insect repellent")),
     ("Personal Care & Hygiene", ("hand wash", "handwash", "body wash", "body bar", "shower gel")),
     ("Vitamins & Supplements", (
         "multivitamin", "vitamin c ", "vitamin d", "vitamin b", "fish oil", "probiotic",

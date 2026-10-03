@@ -167,6 +167,7 @@ def test_mixed_food_codes_shed_pharmacy_and_toiletry_lines():
     assert category_label("106", "Blackmores Fish Oil 1000mg Omega-3 Capsules") == "Vitamins & Supplements"
     assert category_label("106", "Cancer Council Sport Tinted Sunscreen Zinc SPF 50+") == "Skin Care"
     assert category_label("106", "Palmolive Naturals Foaming Hand Wash Vanilla & Berry") == "Personal Care & Hygiene"
+    assert category_label("106", "Banana Boat Kids Lotion") == "Skin Care"
     assert category_label("106", "Tassal Tasmanian Smoked Salmon") == "Meat & Seafood"
     # Real food that mentions a supplement word stays put.
     assert category_label("106", "Activia Probiotic Yoghurt Mango 4x125g") == "Meat & Seafood"
