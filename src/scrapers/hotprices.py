@@ -150,7 +150,11 @@ def _keyword_category(name: str) -> str:
 # FOOD labels only, so "everyday first" ordering isn't led by vitamins.
 _NOT_FOOD_RULES: list[tuple[str, tuple[str, ...]]] = [
     ("Skin Care", ("sunscreen", "spf ", "spf50", "lotion", "after sun", "insect repellent")),
-    ("Personal Care & Hygiene", ("hand wash", "handwash", "body wash", "body bar", "shower gel")),
+    ("Personal Care & Hygiene", (
+        "hand wash", "handwash", "body wash", "bodywash", "body bar", "shower gel", "shower oil",
+        "sanitiser", "sanitizer", "beauty bar", "deodorant", "toothpaste", "shampoo", "conditioner",
+        "face wash", "body scrub", "body polish", " soap",
+    )),
     ("Vitamins & Supplements", (
         "multivitamin", "vitamin c ", "vitamin d", "vitamin b", "fish oil", "probiotic",
         "magnesium", "glucosamine", "omega-3", "omega 3", "collagen", "creatine",
@@ -163,7 +167,8 @@ _NOT_FOOD_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 # ...except these, which really are food or drink.
 _NOT_FOOD_EXCEPT = (
-    "coffee", "espresso", "nespresso", "tea ", "water", "drink", "stock",
+    # " water" with a space: "Rosewater Body Wash" is not a drink.
+    "coffee", "espresso", "nespresso", "tea ", " water", "drink", "stock",
     "yoghurt", "yogurt", "sweetener",
 )
 _FOOD_LABELS = frozenset({
