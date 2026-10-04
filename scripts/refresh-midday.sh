@@ -8,7 +8,8 @@
 # firing 2.5-4h late on GitHub's congested scheduler). By 12:30 AEST the
 # hotprices Coles dump is fresh (refreshes ~11am), so this task rolls the
 # week atomically from the residential IP: fresh Coles + LIVE Woolies +
-# Coles catalogue corrections + the new week's dinners. The cloud cron
+# Coles catalogue corrections + the new week's dinners, then the weekly list
+# alert (so it arrives around lunchtime). The cloud cron
 # remains the backstop for days this machine is off. Registered as a launchd
 # agent (daily 12:30) by scripts/install-launchd.sh.
 #
@@ -91,6 +92,16 @@ run_step audit   -m src.audit_accuracy --write-db --correct --verbose
 run_step dinners -m src.generate_recipes --seed --write-db --revalidate --verbose
 run_step predict -m src.prediction.hazard --write-db --verbose
 run_step ledger  -m src.eval.predictions_eval --snapshot --write-db --verbose
+
+# The weekly list alert, right after a complete roll, so it lands around
+# lunchtime instead of whenever the late cloud cron runs. send_alerts' week
+# gate makes it a no-op until the new Wednesday week exists, and the
+# device_alerts_log unique (one digest per device per week) means the cloud
+# run, the backstop, never sends twice. Only after a clean roll: never alert
+# on a half-written week.
+if [ "$final" -eq 0 ]; then
+    run_step alerts -m src.send_alerts --verbose
+fi
 
 # After a successful Wednesday roll, mark the website's cached product and
 # category pages stale so they show the new week on their next visit.
