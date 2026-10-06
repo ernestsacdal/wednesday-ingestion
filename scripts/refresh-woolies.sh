@@ -28,6 +28,12 @@ notify() {
 }
 
 stamp="$log_dir/.ok-woolies-refresh"
+# A failed run with a later slot still to come today only logs: on a laptop
+# the usual cause is the Mac sleeping mid-run, and the next slot retries
+# (2026-10-05/06: the 06:00 run failed asleep, 09:00 succeeded, yet each
+# failure raised a notification). Notify once nothing is left to retry.
+last_slot=0900   # HHMM of the last launchd slot (scripts/install-launchd.sh)
+retry_left() { [ "$(date +%H%M)" -lt "$last_slot" ]; }
 [ "${1:-}" = "--force" ] && FORCE=1
 # The Mac may run this during a brief "dark wake" from sleep, or before Wi-Fi
 # reconnects (2026-09-26: the 06:03 run timed out, then couldn't resolve the
@@ -72,8 +78,10 @@ echo "[$(date -Iseconds)] starting woolies live refresh" >> "$log"
 code=$?
 [ "$code" -eq 0 ] && echo "$today" > "$stamp"
 echo "[$(date -Iseconds)] finished exit=$code" >> "$log"
-if [ "$code" -ne 0 ]; then
-    notify "Woolies live refresh failed (exit $code). Log: $log"
+if [ "$code" -ne 0 ] && retry_left; then
+    echo "[$(date -Iseconds)] failed; the next slot today retries (no notification)" >> "$log"
+elif [ "$code" -ne 0 ]; then
+    notify "Woolies live refresh failed at its last retry today (exit $code). The cloud job covers it; usually the Mac slept mid-run. Log: $log"
 elif grep -q "live_api_unavailable" "$log"; then
     notify "Woolies live refresh: live Woolworths API unreachable, served the dump fallback."
 fi

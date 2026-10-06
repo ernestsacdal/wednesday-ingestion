@@ -35,6 +35,12 @@ notify() {
 }
 
 stamp="$log_dir/.ok-midday-roll"
+# A failed run with a later slot still to come today only logs: on a laptop
+# the usual cause is the Mac sleeping mid-run, and the next slot retries
+# (2026-10-05/06: the 06:00 run failed asleep, 09:00 succeeded, yet each
+# failure raised a notification). Notify once nothing is left to retry.
+last_slot=2030   # HHMM of the last launchd slot (scripts/install-launchd.sh)
+retry_left() { [ "$(date +%H%M)" -lt "$last_slot" ]; }
 [ "${1:-}" = "--force" ] && FORCE=1
 # The Mac may run this during a brief "dark wake" from sleep, or before Wi-Fi
 # reconnects (2026-09-26: the 06:03 run timed out, then couldn't resolve the
@@ -122,8 +128,10 @@ fi
 
 echo "[$(date -Iseconds)] finished exit=$final" >> "$log"
 [ "$final" -eq 0 ] && echo "$today" > "$stamp"
-if [ "$final" -ne 0 ]; then
-    notify "Midday roll failed (exit $final). Log: $log"
+if [ "$final" -ne 0 ] && retry_left; then
+    echo "[$(date -Iseconds)] failed; the next slot today retries (no notification)" >> "$log"
+elif [ "$final" -ne 0 ]; then
+    notify "Midday roll failed at its last retry today (exit $final). The cloud job covers it; usually the Mac slept mid-run. Log: $log"
 elif grep -q "live_api_unavailable" "$log"; then
     notify "Midday roll: live Woolworths API unreachable, served the dump fallback."
 fi
