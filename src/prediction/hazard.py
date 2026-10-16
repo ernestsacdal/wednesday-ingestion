@@ -566,8 +566,9 @@ def run_predict(db_url: str, log: logging.Logger, *, write_db: bool) -> int:
 
 
 # Materialized views read by anon clients, refreshed after the daily predictions:
-# the web pages' index (0032) and Home's "Start your list" pool (0033).
-_DAILY_VIEWS = ("seo_products", "home_suggestions")
+# the web pages' index (0032), Home's "Start your list" pool (0033) and each
+# product's half-price rhythm for the stock-up hint (0039).
+_DAILY_VIEWS = ("seo_products", "home_suggestions", "half_cycles")
 
 
 def refresh_seo_products(db_url: str, log: logging.Logger) -> None:
