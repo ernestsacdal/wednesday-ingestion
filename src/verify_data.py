@@ -118,6 +118,70 @@ CHECKS: list[Check] = [
              and grantee in ('anon', 'authenticated')""",
         lambda v: v == 0, "== 0 (push-token tables anon-locked)",
     ),
+    # Chemist Warehouse (ADR-0004). Installed apps (v1.0-v1.3) crash on a
+    # retailer they don't know, so search and aisle browse must leave CW out
+    # unless the caller asks for it. These calls send exactly what those apps
+    # send (no `stores`).
+    Check(
+        "cw_hidden_from_default_search",
+        """select (select count(*) from search_products_by_name(
+                      q => 'swisse', page_offset => 0, page_size => 200, retailer_filter => null)
+                    where retailer = 'chemist_warehouse')
+                + (select count(*) from browse_category(
+                      cats => array['Vitamins & Supplements', 'Skin Care', 'Fragrance'],
+                      page_offset => 0, page_size => 200, retailer_filter => null)
+                    where retailer = 'chemist_warehouse')
+                + (select count(*) from browse_category_group(
+                      grp => 'health', page_offset => 0, page_size => 200, retailer_filter => null)
+                    where retailer = 'chemist_warehouse')""",
+        lambda v: v == 0, "== 0 CW rows from the calls installed apps make",
+    ),
+    # CW deals live in catalogue_deals. In specials they would move the app's
+    # week (ADR-0001) and reach the predictor, alerts and the web pages.
+    Check(
+        "cw_not_in_specials",
+        """select (select count(*) from specials s join products p on p.id = s.product_id
+                    where p.retailer = 'chemist_warehouse')
+                + (select count(*) from predictions pr join products p on p.id = pr.product_id
+                    where p.retailer = 'chemist_warehouse')""",
+        lambda v: v == 0, "== 0 CW rows in specials or predictions",
+    ),
+    Check(
+        "cw_not_in_aliases",
+        """select count(*) from product_aliases
+            where canonical_product_id in (select id from products where retailer = 'chemist_warehouse')
+               or variant_product_id in (select id from products where retailer = 'chemist_warehouse')""",
+        lambda v: v == 0, "== 0 CW rows in product_aliases",
+    ),
+    # CW publishes a catalogue's product data a few days after it starts.
+    # Four days in, the running one should have deals. -1 means the newest
+    # catalogue started less than four days ago, so its data may still be
+    # pending. Warn-only: the feed is the publisher's, and nothing for
+    # Coles or Woolworths depends on it.
+    Check(
+        "cw_catalogue_has_deals",
+        """select case when t.n > 0 then t.n
+                       when t.newest > sydney_date() - 4 then -1
+                       else 0 end
+             from (select (select count(*) from catalogue_deals
+                            where retailer = 'chemist_warehouse'
+                              and sydney_date() between starts_on and ends_on) as n,
+                          (select max(starts_on) from catalogue_runs
+                            where retailer = 'chemist_warehouse'
+                              and starts_on <= sydney_date()) as newest) t""",
+        lambda v: v != 0, "> 0 CW deals running (-1 = catalogue under 4 days old)",
+        severity="warn",
+    ),
+    # Info only: the share of running CW deals that can show a real saving
+    # against a known usual price, not just CW's "1/2 price off RRP".
+    Check(
+        "cw_usual_coverage",
+        """select round(100.0 * count(*) filter (where usual_cents is not null)
+                  / nullif(count(*), 0))
+             from catalogue_deals_now""",
+        lambda v: True, "info: % of running CW deals with a known usual price",
+        severity="warn",
+    ),
     # Catalogue wipes.
     Check(
         "coles_catalogue_floor",
@@ -128,10 +192,12 @@ CHECKS: list[Check] = [
     # overwriting price + name (the Sunsilk stale-price fix, 2026-07-28), a
     # fresh last_seen across the catalogue implies fresh prices; if this
     # collapses, the catalogue ingest silently stopped and prices are aging.
+    # Coles and Woolworths only: CW products are refreshed by refresh_cw.
     Check(
         "catalogue_recently_refreshed",
         """select count(*) from products
-           where last_seen >= now() - interval '2 days'""",
+           where retailer in ('coles', 'woolworths')
+             and last_seen >= now() - interval '2 days'""",
         lambda v: v >= 40_000, ">= 40,000 seen in 2 days (typical ~45,000)",
     ),
     Check(

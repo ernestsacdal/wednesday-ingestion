@@ -48,3 +48,37 @@ def test_current_week_live_is_deadline_gated():
     assert not check.active(datetime(2026, 9, 30, 2, 30, tzinfo=timezone.utc))
     # Wed 30 Sep 15:07 AEST (the verify-live cron) -> enforced.
     assert check.active(datetime(2026, 9, 30, 5, 7, tzinfo=timezone.utc))
+
+
+def _named(name):
+    return next(c for c in vd.CHECKS if c.name == name)
+
+
+def test_chemist_warehouse_guards_fail_the_run():
+    for name in ("cw_hidden_from_default_search", "cw_not_in_specials", "cw_not_in_aliases"):
+        assert _named(name).severity == "fail"
+
+
+def test_cw_search_guard_calls_rpcs_like_installed_apps():
+    # Installed apps never send `stores`; the guard must call the RPCs the same way.
+    sql = _named("cw_hidden_from_default_search").sql
+    assert "stores" not in sql
+    for rpc in ("search_products_by_name(", "browse_category(", "browse_category_group("):
+        assert rpc in sql
+
+
+def test_cw_catalogue_pending_is_not_a_warning():
+    check = _named("cw_catalogue_has_deals")
+    assert check.severity == "warn"
+    assert check.ok(-1) and check.ok(230)
+    assert not check.ok(0)
+
+
+def test_cw_usual_coverage_is_info_only():
+    check = _named("cw_usual_coverage")
+    assert all(check.ok(v) for v in (None, 0, 100))
+
+
+def test_catalogue_freshness_counts_coles_and_woolworths_only():
+    sql = _named("catalogue_recently_refreshed").sql
+    assert "retailer in ('coles', 'woolworths')" in sql
