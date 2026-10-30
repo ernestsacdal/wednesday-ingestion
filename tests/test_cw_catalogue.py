@@ -1,7 +1,19 @@
 """Chemist Warehouse catalogue parsing (src/scrapers/cw_catalogue.py) and the
 usual-price page parser (src/cw_usual_prices.py). Pure logic, no network."""
+import logging
+from datetime import date
+
 from src.cw_usual_prices import parse_page
-from src.scrapers.cw_catalogue import category_for, image_url, parse_claim, parse_region, product_url
+from src.scrapers import cw_catalogue
+from src.scrapers.cw_catalogue import (
+    Catalogue,
+    category_for,
+    fetch_catalogue,
+    image_url,
+    parse_claim,
+    parse_region,
+    product_url,
+)
 
 
 def region(**over):
@@ -78,3 +90,27 @@ def test_usual_price_page():
             '"type":"cwr-au-price","rrp":{"amount":77.99,"currencyCode":"AUD"}}}],"availability":...')
     assert parse_page(html) == (6599, 7799)
     assert parse_page("<html>no data</html>") == (None, None)
+
+
+class _Feed:
+    """Stands in for the publisher's feed: 3 pages, one block of regions."""
+
+    def __init__(self, regions):
+        self.regions = regions
+
+    def get(self, url, timeout=None):
+        data = [{"page": n} for n in range(3)] if "page-images" in url else {"0": self.regions}
+        return type("Resp", (), {"status_code": 200, "json": lambda _self: data})()
+
+
+def test_catalogue_without_product_regions_is_pending(monkeypatch):
+    monkeypatch.setattr(cw_catalogue, "_DELAY_S", 0)
+    cat = Catalogue("38855192", "Test", date(2026, 10, 29), date(2026, 11, 11))
+    log = logging.getLogger("test")
+    # A new catalogue's cover links arrive before its products
+    links = [{"id": "1", "field_region_type": "link"}, {"id": "2", "field_region_type": "link"}]
+    f = fetch_catalogue(cat, _Feed(links), log)
+    assert (f.regions, f.products, f.complete, f.error) == (2, 0, False, "regions_pending")
+    # Repeated regions count once
+    f = fetch_catalogue(cat, _Feed([region(), region()]), log)
+    assert (f.regions, f.products, len(f.deals), f.complete, f.error) == (1, 1, 1, True, None)

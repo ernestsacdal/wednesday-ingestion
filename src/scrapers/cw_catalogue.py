@@ -16,7 +16,7 @@ to 1/2 price") have no single product. CW prices its deals off RRP, not off
 what it normally charges, so the RRP and claim are kept as CW states them and
 the real saving is measured elsewhere against CW's usual price. Product data
 lands a few days after a catalogue starts: a catalogue with pages but no
-regions yet is "pending", not an error.
+product regions yet is "pending", not an error.
 
 Public surface:
     list_catalogues(session, log) -> list[Catalogue]
@@ -238,7 +238,7 @@ def list_catalogues(session: requests.Session, log: logging.Logger) -> list[Cata
 def fetch_catalogue(catalogue: Catalogue, session: requests.Session,
                     log: logging.Logger) -> CatalogueFetch:
     """Every exact-product deal in one catalogue; complete=True only when every
-    page block was fetched and at least one region was published."""
+    page block was fetched and at least one product region was published."""
     out = CatalogueFetch(catalogue=catalogue)
     pages = _get(session, f"catalogue/{catalogue.nid}/page-images/json?_format=json", log)
     if not isinstance(pages, list) or not pages:
@@ -272,9 +272,10 @@ def fetch_catalogue(catalogue: Catalogue, session: requests.Session,
                 if deal and (deal.cw_id not in seen or deal.price_cents < seen[deal.cw_id].price_cents):
                     seen[deal.cw_id] = deal
     out.deals = list(seen.values())
-    if out.regions == 0:
+    # A new catalogue publishes a cover link or two before its products.
+    if out.products == 0:
         out.error = "regions_pending"
-    out.complete = ok and out.regions > 0
+    out.complete = ok and out.products > 0
     log.info("cw.fetched catalogue=%s title=%r pages=%d regions=%d products=%d exact=%d half_rrp=%d complete=%s",
              catalogue.nid, catalogue.title, out.pages, out.regions, out.products,
              len(out.deals), out.half_rrp, out.complete)
