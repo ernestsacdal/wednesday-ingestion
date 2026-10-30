@@ -49,6 +49,8 @@ The app never calls anything in this repo; it only reads finished tables.
 |---|---|---|
 | [hotprices.org](https://hotprices.org) daily dumps ([Javex/hotprices-au](https://github.com/Javex/hotprices-au), MIT) | Coles prices + price history; Woolies fallback | Daily, ~01:00 UTC |
 | Woolworths browse API | Woolies current-week half-price specials | Daily |
+| Chemist Warehouse's catalogue, via its publisher's public feed (Nexus Publications) | Chemist Warehouse catalogue deals, kept in `catalogue_deals` and never in `specials` | Daily; a new catalogue every second Thursday |
+| Chemist Warehouse product pages (`/buy/`, allowed by its robots.txt) | Its usual prices, so savings are measured against what it normally charges, not RRP | From a home machine: up to 200 pages a day, 1.5 s apart |
 
 We deliberately do not scrape the retailers' websites ourselves. The
 hotprices-au project already runs the browser and publishes a hosted JSON
@@ -176,12 +178,13 @@ merely that the scripts didn't crash. Several early incidents ran green
 in CI while a retailer's week was silently empty — that class of failure
 is now engineered away:
 
-- `src/verify_data.py` asserts 15 invariants against the live database at
+- `src/verify_data.py` asserts 34 invariants against the live database at
   the end of every workflow — per-retailer current-week floors, week
   freshness, no marketplace or legacy rows, catalogue floors, both
   retailers scraped within 26h, predictions/accuracy/aliases fresh,
-  price sanity, category coverage. Any violation exits non-zero, fails
-  the workflow, and triggers GitHub's failure email.
+  price sanity, category coverage, and Chemist Warehouse kept out of the
+  week tables and out of what installed apps can search. Any violation
+  exits non-zero, fails the workflow, and triggers GitHub's failure email.
 - Writers take a Postgres advisory lock, so a manual run and the cron can
   never interleave.
 - A partial scrape (API died mid-pagination) writes upserts only — an
@@ -195,7 +198,7 @@ is now engineered away:
 
 | Workflow | Cron (UTC) | Steps |
 |---|---|---|
-| `daily-ingestion.yml` | 02:00 daily | Coles refresh (dump) -> Woolies refresh (API, dump fallback) -> image fill -> push digests (`send_alerts`, once per device per week via DB dedup) -> **verify_data** |
+| `daily-ingestion.yml` | 02:00 daily | Coles refresh (dump) -> Woolies refresh (API, dump fallback) -> image fill -> push digests (`send_alerts`, once per device per week via DB dedup) -> Chemist Warehouse catalogue (`refresh_cw`, soft) -> **verify_data** |
 | `verify-live.yml` | 05:07 daily (15:07 AEST) | **verify_data** only: fails the same day if the live Woolworths set is missing after the Wednesday 15:00 deadline or no live run landed in 36h |
 | `weekly-catalogue.yml` | 03:00 Sunday | full catalogue load -> predictor -> backtest (track record) -> cross-store matcher -> **verify_data** |
 
@@ -219,6 +222,8 @@ src/
 ├── prediction/hazard.py        prediction v2: gap model, walk-forward gate, daily predictions
 ├── match_counterparts.py        cross-store product matcher -> product_aliases
 ├── send_alerts.py               weekly watchlist push digests (Expo)
+├── refresh_cw.py                Chemist Warehouse catalogue -> products + catalogue_deals
+├── cw_usual_prices.py           Chemist Warehouse usual prices from its product pages
 ├── env.py                       shared .env loading
 ├── purge_marketplace.py         one-off cutover (dry-run first)
 ├── purge_synthetic_skus.py      one-off cutover (dry-run first)
@@ -231,6 +236,7 @@ src/
 │   ├── hotprices.py             dump fetch/parse, half-price derivation, categories,
 │   │                            marketplace exclusion (both retailers)
 │   ├── woolies_specials.py      Woolworths browse-API scraper
+│   ├── cw_catalogue.py          Chemist Warehouse catalogue via its publisher's feed
 │   └── product_images.py        image discovery helpers
 └── prediction/
     └── statistical.py           cycle predictor (pure stdlib statistics)
@@ -263,6 +269,10 @@ python -m src.prediction.statistical --from-db --write-db --min-cycles 1
 python -m src.backtest --write-db
 python -m src.match_counterparts --write-db
 
+# Chemist Warehouse: the catalogue, then usual prices (both dry runs without --write-db):
+python -m src.refresh_cw --write-db --verbose
+python -m src.cw_usual_prices --write-db --limit 200 --verbose
+
 # Check the invariants any time:
 python -m src.verify_data --verbose
 ```
@@ -271,7 +281,8 @@ Residential jobs: the live Woolworths API is blocked from GitHub Actions
 IPs, so two jobs also run from a home machine (macOS launchd):
 `scripts/refresh-woolies.sh` (06:00, live Woolies refresh) and
 `scripts/refresh-midday.sh` (12:30, atomic week roll: Coles, live Woolies,
-SaleFinder corrections, dinners). `scripts/install-launchd.sh` registers
+SaleFinder corrections, dinners, the alert, then Chemist Warehouse as soft
+steps that never change the exit code). `scripts/install-launchd.sh` registers
 both (`--uninstall` removes them); logs go to `~/Library/Logs/Wednesday/`.
 The cloud cron remains the backstop when that machine is off.
 
