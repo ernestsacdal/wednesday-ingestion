@@ -126,6 +126,20 @@ if [ "$final" -eq 0 ] && [ "$(TZ=Australia/Sydney date +%u)" = "3" ]; then
     revalidate_site
 fi
 
+# Chemist Warehouse (ADR-0004, wednesday repo): its catalogue, then up to 200
+# usual-price checks on its product pages (residential IP, ~10 min). Soft
+# steps, after the alert: they never change the exit code, so a CW hiccup
+# can't hold back the Coles/Woolworths roll, the alert or a retry slot.
+soft_step() {
+    local name="$1"; shift
+    echo "[$(date -Iseconds)] step=$name starting (soft)" >> "$log"
+    /usr/bin/caffeinate -i -s /usr/bin/perl -e 'alarm shift; exec @ARGV' "$STEP_TIMEOUT" "$py" -X utf8 "$@" >> "$log" 2>&1
+    local code=$?
+    echo "[$(date -Iseconds)] step=$name exit=$code (soft, ignored)" >> "$log"
+}
+soft_step cw       -m src.refresh_cw --write-db --verbose
+soft_step cw_usual -m src.cw_usual_prices --write-db --limit 200 --verbose
+
 echo "[$(date -Iseconds)] finished exit=$final" >> "$log"
 [ "$final" -eq 0 ] && echo "$today" > "$stamp"
 if [ "$final" -ne 0 ] && retry_left; then

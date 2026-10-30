@@ -119,6 +119,17 @@ jobs:
             echo "not Wednesday (Sydney) or no secret configured: skipping"
           fi
 
+      # Chemist Warehouse's catalogue from its publisher's feed (ADR-0004,
+      # wednesday repo). Writes catalogue_deals only, never specials, so it
+      # can't move the week. Soft: the feed is a third party's, and nothing
+      # for Coles or Woolworths depends on it. Usual prices come from the Mac.
+      - name: Refresh Chemist Warehouse catalogue
+        continue-on-error: true
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PYTHONIOENCODING: utf-8
+        run: python -m src.refresh_cw --write-db --verbose
+
       # The loud safety net: asserts data invariants (per-retailer current-week
       # floors, week freshness, no junk rows, derived-data freshness...) and
       # FAILS the run when any are violated — which triggers GitHub's failure
