@@ -45,7 +45,7 @@ import psycopg
 import requests
 
 from src.env import load_dotenv
-from src.weeks import current_promo_week, promo_week_start
+from src.weeks import current_promo_week, promo_week_start, sydney_today
 
 EXPO_SEND_URL = "https://exp.host/--/api/v2/push/send"
 EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts"
@@ -74,23 +74,45 @@ def _truncate(name: str) -> str:
     return trimmed[: _MAX_NAME_CHARS - 1] + "…" if len(trimmed) > _MAX_NAME_CHARS else trimmed
 
 
-def build_message(token: str, names: list[str]) -> dict:
+def _item_list(names: list[str]) -> str:
+    listed = [_truncate(x) for x in names[:_MAX_LISTED]]
+    extra = len(names) - len(listed)
+    return ", ".join(listed) + (f" + {extra} more" if extra > 0 else "")
+
+
+def _day(d: date) -> str:
+    return f"{d:%a} {d.day} {d:%b}"
+
+
+def build_message(token: str, names: list[str], cw_names: list[str] | None = None,
+                  cw_ends: date | None = None) -> dict:
     """Canonical weekly-digest payload (PRD section 2.1).
 
+    Half-price items first; hearted Chemist Warehouse items on a catalogue
+    deal get their own sentence, never called half price (ADR-0004).
     Mirrored by mobile/src/lib/notifications.ts#buildDigestContent so the
     in-app dev preview exercises identical strings.
     """
-    n = len(names)
-    listed = [_truncate(x) for x in names[:_MAX_LISTED]]
-    extra = n - len(listed)
-    item_list = ", ".join(listed) + (f" + {extra} more" if extra > 0 else "")
-    if n == 1:
-        body = f"1 of your items is half-price this week: {item_list}."
+    cw_names = cw_names or []
+    n, m = len(names), len(cw_names)
+    until = f" until {_day(cw_ends)}" if cw_ends else ""
+    if n:
+        if n == 1:
+            body = f"1 of your items is half-price this week: {_item_list(names)}."
+        else:
+            body = f"{n} of your items are half-price this week: {_item_list(names)}."
+        if m:
+            body += f" Also on special at Chemist Warehouse: {_item_list(cw_names)}."
+        title = "Half-price this week"
     else:
-        body = f"{n} of your items are half-price this week: {item_list}."
+        if m == 1:
+            body = f"{_truncate(cw_names[0])} is on special at Chemist Warehouse{until}."
+        else:
+            body = f"{m} of your items are on special at Chemist Warehouse{until}: {_item_list(cw_names)}."
+        title = "On special this week"
     return {
         "to": token,
-        "title": "Half-price this week",
+        "title": title,
         "body": body,
         "sound": "default",
         "data": {"url": "/watchlist"},
@@ -190,10 +212,48 @@ def _gc_orphans(conn: psycopg.Connection, log: logging.Logger, stats: AlertStats
         log.info("alerts.gc deleted=%d (not synced in %d days)", stats.gc_deleted, _GC_DAYS)
 
 
+def cw_in_digest(today: date, force: bool = False) -> bool:
+    """Chemist Warehouse deals ride the Wednesday alert only. The app promises
+    one alert, on Wednesday; a CW catalogue's data lands days after it starts,
+    so without this a CW-only digest would go out on whatever day it landed."""
+    return force or today.weekday() == 2
+
+
+@dataclass
+class Digest:
+    device_id: str
+    token: str
+    product_ids: list
+    names: list[str]
+    cw_names: list[str]
+    cw_ends: date | None
+
+
+# Hearted Chemist Warehouse items on a catalogue deal (ADR-0004): not on the
+# deal's last day, and never one known to be no cheaper than CW's usual price.
+_CW_SQL = """
+    select dw.device_id, dw.expo_push_token,
+           array_agg(p.id   order by d.ends_on, p.name) as product_ids,
+           array_agg(p.name order by d.ends_on, p.name) as names,
+           min(d.ends_on) as ends_on
+      from device_watchlists dw
+      join catalogue_deals_now d on d.product_id = any(dw.watched_product_ids)
+      join products p on p.id = d.product_id
+     where dw.expo_push_token is not null
+       and dw.notification_cadence <> 'off'
+       and d.ends_on > sydney_date()
+       and coalesce(d.real_saving_pct, 1) > 0
+       and not exists (select 1 from device_alerts_log l
+                        where l.device_id = dw.device_id
+                          and l.week_start = %(week)s
+                          and l.alert_type = 'weekly_digest')
+"""
+
+
 def _eligible_digests(
-    conn: psycopg.Connection, week: date, only_device: str | None,
-) -> list[tuple[str, str, list, list]]:
-    """[(device_id, token, product_ids, names)] for devices due a digest."""
+    conn: psycopg.Connection, week: date, only_device: str | None, with_cw: bool,
+) -> list[Digest]:
+    """Devices due a digest: half-price items and/or Chemist Warehouse deals."""
     sql = """
         select dw.device_id, dw.expo_push_token,
                array_agg(p.id   order by s.discount_pct desc, p.name) as product_ids,
@@ -211,24 +271,37 @@ def _eligible_digests(
                               and l.alert_type = 'weekly_digest')
     """
     params: dict = {"week": week}
+    cw_sql = _CW_SQL
     if only_device:
         sql += " and dw.device_id = %(device)s"
+        cw_sql += " and dw.device_id = %(device)s"
         params["device"] = only_device.lower()
     sql += " group by dw.device_id, dw.expo_push_token"
+    cw_sql += " group by dw.device_id, dw.expo_push_token"
+    out: dict[str, Digest] = {}
     with conn.cursor() as cur:
         cur.execute(sql, params)
-        return cur.fetchall()
+        for device_id, token, ids, names in cur.fetchall():
+            out[device_id] = Digest(device_id, token, list(ids), list(names), [], None)
+        if not with_cw:
+            return list(out.values())
+        cur.execute(cw_sql, params)
+        for device_id, token, ids, names, ends in cur.fetchall():
+            d = out.setdefault(device_id, Digest(device_id, token, [], [], [], None))
+            d.product_ids += list(ids)
+            d.cw_names, d.cw_ends = list(names), ends
+    return list(out.values())
 
 
 def _send_and_log(
     conn: psycopg.Connection,
     week: date,
-    digests: list[tuple[str, str, list, list]],
+    digests: list[Digest],
     log: logging.Logger,
     stats: AlertStats,
 ) -> None:
     for batch in _chunks(digests, _SEND_BATCH):
-        messages = [build_message(token, names) for (_d, token, _ids, names) in batch]
+        messages = [build_message(d.token, d.names, d.cw_names, d.cw_ends) for d in batch]
         try:
             resp = requests.post(
                 EXPO_SEND_URL, json=messages, headers=_EXPO_HEADERS, timeout=_HTTP_TIMEOUT,
@@ -242,7 +315,9 @@ def _send_and_log(
 
         rows = []
         with conn.cursor() as cur:
-            for (device_id, _token, product_ids, names), ticket in zip(batch, tickets):
+            for digest, ticket in zip(batch, tickets):
+                device_id, product_ids = digest.device_id, digest.product_ids
+                count = len(digest.names) + len(digest.cw_names)
                 ok = ticket.get("status") == "ok"
                 detail = None
                 if not ok:
@@ -257,7 +332,7 @@ def _send_and_log(
                 else:
                     stats.sent += 1
                 rows.append((
-                    device_id, "weekly_digest", week, product_ids, len(names),
+                    device_id, "weekly_digest", week, product_ids, count,
                     ticket.get("id"), "sent" if ok else "errored",
                     str(detail)[:500] if detail else None,
                 ))
@@ -312,15 +387,16 @@ def run_alerts(
             return stats
         week = actual
 
-        digests = _eligible_digests(conn, week, only_device)
+        digests = _eligible_digests(conn, week, only_device,
+                                    with_cw=cw_in_digest(sydney_today(), force))
         stats.eligible = len(digests)
         log.info("alerts.eligible devices=%d week=%s", stats.eligible, week)
 
         if dry_run:
-            for device_id, token, _ids, names in digests:
-                msg = build_message(token, names)
-                log.info("alerts.dry_run device=%s items=%d body=%r",
-                         device_id, len(names), msg["body"])
+            for d in digests:
+                msg = build_message(d.token, d.names, d.cw_names, d.cw_ends)
+                log.info("alerts.dry_run device=%s items=%d title=%r body=%r",
+                         d.device_id, len(d.names) + len(d.cw_names), msg["title"], msg["body"])
             return stats
 
         if digests:
