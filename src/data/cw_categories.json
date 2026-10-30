@@ -1,0 +1,20 @@
+{
+  "_comment": "Chemist Warehouse catalogue category ids (Lasoo taxonomy, from the publisher's NewLasooCategoryTaxonomy.json) -> Wednesday category labels. Measured on the 15-28 Oct 2026 catalogue; unmapped ids fall back to the name keyword rules.",
+  "525": "Vitamins & Supplements",
+  "2890": "Vitamins & Supplements",
+  "5702": "Vitamins & Supplements",
+  "567": "Skin Care",
+  "479": "Fragrance",
+  "518": "Pharmacy Medicine",
+  "477": "Cosmetics",
+  "478": "Cosmetics",
+  "486": "Hair Care",
+  "2441": "Hair Care",
+  "4766": "Hair Care",
+  "527": "Oral Care",
+  "3040": "Oral Care",
+  "484": "Personal Care & Hygiene",
+  "515": "First Aid & Medicinal",
+  "2984": "Healthy Snacks & Foods",
+  "5723": "Sports Drinks"
+}
