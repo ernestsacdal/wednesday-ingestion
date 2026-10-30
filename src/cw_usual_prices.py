@@ -6,12 +6,17 @@ normal price (and the RRP). This checks CW products that aren't on a deal and
 haven't been checked in CHECK_EVERY_DAYS days, politely, one page every
 DELAY_S seconds, and records each price as a 'cw_page' observation.
 catalogue_usual() in the database takes the median and ignores any check that
-turns out to fall inside one of the product's own deals.
+turns out to fall inside one of the product's own deals. While the running
+catalogue's products aren't published yet (its first few days), it doesn't
+check at all: it can't tell which products are on special, so a check could
+catch a deal price and only be thrown away later.
 
 Plain HTTP with an honest User-Agent; robots.txt allows /buy/ (it disallows
 /api/ and the promotions filters, which this never touches). Runs from the
 Mac's residential IP in the midday roll; stops after BLOCK_STREAK refusals in
-a row so a block never turns into a hammering.
+a row so a block never turns into a hammering. A page that's gone (404) clears
+the product's link, so it isn't asked for again until a catalogue lists the
+product and refresh_cw restores the link.
 
     python -m src.cw_usual_prices --verbose               # dry run (no writes)
     python -m src.cw_usual_prices --write-db --limit 200 --verbose
@@ -48,6 +53,18 @@ def parse_page(html: str) -> tuple[int | None, int | None]:
     rrp = round(float(r.group(1)) * 100) if r else None
     return (price if price > 0 else None), rrp
 
+
+# The running catalogue, when its newest fetch found no products yet.
+_PENDING = """
+select r.catalogue_id, r.catalogue_title
+  from catalogue_runs r
+ where r.retailer = 'chemist_warehouse'
+   and sydney_date() between r.starts_on and r.ends_on
+   and r.products = 0
+   and r.fetched_at = (select max(x.fetched_at) from catalogue_runs x
+                        where x.retailer = r.retailer and x.catalogue_id = r.catalogue_id)
+ limit 1
+"""
 
 _CANDIDATES = """
 select p.id::text, p.source_product_url
@@ -97,13 +114,20 @@ def run(*, db_url: str, write: bool, limit: int, log: logging.Logger) -> int:
     import psycopg
 
     with psycopg.connect(db_url, connect_timeout=30) as conn, conn.cursor() as cur:
+        cur.execute(_PENDING)
+        waiting = cur.fetchone()
+        if waiting:
+            log.info("cw_usual.waiting catalogue=%s title=%r — its products aren't published yet",
+                     *waiting)
+            return 0
         cur.execute(_CANDIDATES, {"every": CHECK_EVERY_DAYS, "limit": limit})
         todo = cur.fetchall()
     log.info("cw_usual.candidates n=%d", len(todo))
     session = build_session()
-    checked = written = missing = 0
+    checked = written = 0
     refused = 0
     pending: list[tuple[str, int]] = []
+    gone: list[str] = []
     for pid, url in todo:
         try:
             r = session.get(url, timeout=25)
@@ -122,7 +146,7 @@ def run(*, db_url: str, write: bool, limit: int, log: logging.Logger) -> int:
             continue
         refused = 0
         if r.status_code == 404:
-            missing += 1
+            gone.append(pid)
             time.sleep(DELAY_S)
             continue
         price, rrp = parse_page(r.text) if r.status_code == 200 else (None, None)
@@ -138,8 +162,13 @@ def run(*, db_url: str, write: bool, limit: int, log: logging.Logger) -> int:
         time.sleep(DELAY_S)
     if pending:
         written += _flush(db_url, pending)
-    log.info("cw_usual.done checked=%d written=%d missing=%d refused_streak=%d",
-             checked, written, missing, refused)
+    if write and gone:
+        with psycopg.connect(db_url, connect_timeout=30) as conn, conn.cursor() as cur:
+            cur.execute("update products set source_product_url = null where id = any(%s::uuid[])",
+                        (gone,))
+            conn.commit()
+    log.info("cw_usual.done checked=%d written=%d gone=%d refused_streak=%d",
+             checked, written, len(gone), refused)
     return 0
 
 
