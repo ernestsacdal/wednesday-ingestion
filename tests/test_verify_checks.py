@@ -79,6 +79,13 @@ def test_cw_usual_coverage_is_info_only():
     assert all(check.ok(v) for v in (None, 0, 100))
 
 
+def test_cloud_dispatch_only_warns():
+    check = _named("cloud_dispatch_ok")
+    assert check.severity == "warn"
+    assert check.ok(204)
+    assert not any(check.ok(v) for v in (0, -1, -2, 401, 404))
+
+
 def test_catalogue_freshness_counts_coles_and_woolworths_only():
     sql = _named("catalogue_recently_refreshed").sql
     assert "retailer in ('coles', 'woolworths')" in sql

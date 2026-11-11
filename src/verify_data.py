@@ -383,6 +383,18 @@ CHECKS: list[Check] = [
                        and s.product_id::text = ing->>'product_id')""",
         lambda v: v == 0, "0 dinner heroes without a current half-price special",
     ),
+    # The on-time cloud runs (migration 0041, wednesday repo): pg_cron asks
+    # GitHub to start this workflow at 12:45 daily and 5pm Wednesdays. Warn
+    # only: without it GitHub's own schedule still runs everything, ~7h late.
+    # 0 = no token in Vault, -1 = request error, -2 = no dispatch in 26h.
+    Check(
+        "cloud_dispatch_ok",
+        """select coalesce((select status from private.dispatch_log
+                             where at > now() - interval '26 hours'
+                             order by at desc limit 1), -2)""",
+        lambda v: v == 204, "latest lunchtime/5pm dispatch in 26h got GitHub's 204",
+        severity="warn",
+    ),
 ]
 
 
