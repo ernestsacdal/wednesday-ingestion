@@ -7,13 +7,14 @@ name: daily-ingestion
 #   - Woolworths:  the retailer's own authoritative browse API
 #                  (source='woolies_catalogue').
 #
-# Cron is UTC. ~02:17 UTC daily = ~12:17pm AEST / ~1:17pm AEDT — ~1h after the
-# dump refresh, so Coles is always same-day fresh and mid-week additions are
-# caught. Off-the-hour minute: GitHub's scheduler is most congested on :00
-# slots and has been dispatching 2.5-4h late; an odd minute dispatches closer
-# to time. The midday residential task (scripts/refresh-midday.sh) is the
-# primary week-roller; this run is the backstop (ADR-0001, wednesday repo).
-# Manual trigger also exposed.
+# On time: Supabase pg_cron starts this workflow (workflow_dispatch) at 12:45
+# Sydney daily and 5pm on Wednesdays (migration 0041, wednesday repo), because
+# GitHub's own schedule below started 6.5-7.7h late every day in Nov 2026. The
+# schedule stays as the backstop if the dispatch token lapses (verify_data's
+# cloud_dispatch_ok warns). Cron is UTC: 02:17 UTC = ~12:17pm AEST / ~1:17pm
+# AEDT, after the dump refresh. The residential Mac task
+# (scripts/refresh-midday.sh) adds the LIVE Woolies list this run can't fetch
+# (ADR-0001, wednesday repo).
 on:
   schedule:
     - cron: "17 2 * * *"  # ~02:17 UTC daily, just after the hotprices dump refresh
@@ -21,6 +22,12 @@ on:
 
 permissions:
   contents: read
+
+# A dispatch and the late schedule can meet: queue, don't overlap (each run is
+# safe to repeat).
+concurrency:
+  group: daily-ingestion
+  cancel-in-progress: false
 
 jobs:
   ingest:
