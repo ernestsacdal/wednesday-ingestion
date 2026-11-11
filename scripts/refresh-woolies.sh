@@ -64,9 +64,22 @@ for h in ("www.woolworths.com.au", "hotprices.org"):
 today=$(TZ=Australia/Sydney date +%F)
 already_ok() { [ "${FORCE:-}" != "1" ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$today" ]; }
 
+# A sleeping Mac on battery can't be kept awake (caffeinate's PreventSystemSleep
+# only holds on AC power), so a run then gets ~2-second dark wakes and fails;
+# see refresh-midday.sh. Skip instead: the midday roll's 15-minute check
+# fetches the live list once the Mac is awake.
+on_ac()      { /usr/bin/pmset -g batt | head -1 | grep -q "AC Power"; }
+full_wake()  { /usr/bin/pmset -g systemstate | grep -q "Graphics"; }
+lid_closed() { /usr/sbin/ioreg -r -k AppleClamshellState -d 4 | grep -q '"AppleClamshellState" = Yes'; }
+mac_awake()  { on_ac || { full_wake && ! lid_closed; }; }
+
 cd "$repo" || exit 1
 if already_ok; then
     echo "[$(date -Iseconds)] already succeeded today ($today) — skipping this slot" >> "$log"
+    exit 0
+fi
+if ! mac_awake; then
+    echo "[$(date -Iseconds)] Mac asleep on battery — skipping; the midday roll fetches the live list once it's awake" >> "$log"
     exit 0
 fi
 if ! wait_for_network; then

@@ -3,6 +3,12 @@
 #
 #   com.ernestmikhail.wednesday.woolies-refresh   daily 06:00, 09:00                 refresh-woolies.sh
 #   com.ernestmikhail.wednesday.midday-roll       daily 12:30, 13:45, 17:00, 20:30   refresh-midday.sh
+#                                                 + a check every 15 minutes
+#
+# The 15-minute check is the catch-up for a Mac that slept through its slot:
+# a sleeping Mac on battery can't be kept awake, so refresh-midday.sh defers
+# then, and the check runs the roll within minutes of the Mac waking. The
+# script exits at once (no log) when today's roll is done or it's before 12:30.
 #
 # The 13:45 midday retry covers daylight saving: at 12:30 AEDT the hotprices
 # Coles dump (refreshed ~01:00 UTC) may be only minutes old, so the stale-dump
@@ -28,10 +34,10 @@ agents="$HOME/Library/LaunchAgents"
 log_dir="$HOME/Library/Logs/Wednesday"
 domain="gui/$(id -u)"
 
-# label  script  HH:MM[,HH:MM...]
+# label  script  HH:MM[,HH:MM...]  check-every-seconds (0 = slots only)
 jobs=(
-    "com.ernestmikhail.wednesday.woolies-refresh refresh-woolies.sh 06:00,09:00"
-    "com.ernestmikhail.wednesday.midday-roll refresh-midday.sh 12:30,13:45,17:00,20:30"
+    "com.ernestmikhail.wednesday.woolies-refresh refresh-woolies.sh 06:00,09:00 0"
+    "com.ernestmikhail.wednesday.midday-roll refresh-midday.sh 12:30,13:45,17:00,20:30 900"
 )
 
 calendar_entries() {
@@ -42,8 +48,13 @@ calendar_entries() {
     done
 }
 
+start_interval() {
+    [ "$1" -gt 0 ] || return 0
+    printf '    <key>StartInterval</key>\n    <integer>%d</integer>\n' "$1"
+}
+
 write_plist() {
-    local label="$1" script="$2" times="$3"
+    local label="$1" script="$2" times="$3" every="$4"
     cat > "$agents/$label.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -62,6 +73,7 @@ write_plist() {
     <array>
 $(calendar_entries "$times")
     </array>
+$(start_interval "$every")
     <key>StandardOutPath</key>
     <string>$log_dir/launchd-$label.log</string>
     <key>StandardErrorPath</key>
@@ -88,11 +100,13 @@ fi
 
 mkdir -p "$agents" "$log_dir"
 for job in "${jobs[@]}"; do
-    read -r label script times <<< "$job"
-    write_plist "$label" "$script" "$times"
+    read -r label script times every <<< "$job"
+    write_plist "$label" "$script" "$times" "$every"
     plutil -lint -s "$agents/$label.plist"
     launchctl bootout "$domain/$label" 2>/dev/null || true
     launchctl bootstrap "$domain" "$agents/$label.plist"
-    printf 'installed %s (daily %s)\n' "$label" "${times//,/ + }"
+    extra=""
+    [ "$every" -gt 0 ] && extra=", plus a check every $((every / 60)) min"
+    printf 'installed %s (daily %s%s)\n' "$label" "${times//,/ + }" "$extra"
 done
 echo "logs: $log_dir"

@@ -4,14 +4,16 @@
 # Why this exists: the app's "current week" is max(week_start), and on
 # Wednesdays the week must arrive WHOLE — on 2026-07-15 the Woolies-only
 # morning task rolled the new week alone and live App Store users saw
-# "Coles: 0 items" for hours (the cloud cron, scheduled noon AEST, has been
-# firing 2.5-4h late on GitHub's congested scheduler). By 12:30 AEST the
+# "Coles: 0 items" for hours. By 12:30 AEST the
 # hotprices Coles dump is fresh (refreshes ~11am), so this task rolls the
 # week atomically from the residential IP: fresh Coles + LIVE Woolies +
 # Coles catalogue corrections + the new week's dinners, then the weekly list
-# alert (so it arrives around lunchtime). The cloud cron
-# remains the backstop for days this machine is off. Registered as a launchd
-# agent (daily 12:30) by scripts/install-launchd.sh.
+# alert (so it arrives around lunchtime). The cloud runs the same roll at
+# 12:45 (a Supabase pg_cron dispatch, migration 0041; GitHub's own schedule
+# started 6.5-7.7h late in Nov 2026) with the backup Woolies list, so this
+# task's real job is the LIVE Woolies list the cloud can't fetch. Registered
+# as a launchd agent (12:30, plus a check every 15 minutes) by
+# scripts/install-launchd.sh.
 #
 # Every step has its own guards (solo-roll guard, stale-dump gate, sticky-live
 # guard, dinner revalidation), so re-runs and out-of-order timing are safe.
@@ -35,17 +37,22 @@ notify() {
 }
 
 stamp="$log_dir/.ok-midday-roll"
-# A failed run with a later slot still to come today only logs: on a laptop
-# the usual cause is the Mac sleeping mid-run, and the next slot retries
+# A failed run before the last slot only logs, and a later check retries
 # (2026-10-05/06: the 06:00 run failed asleep, 09:00 succeeded, yet each
-# failure raised a notification). Notify once nothing is left to retry.
+# failure raised a notification). From the last slot on, notify once a day.
 last_slot=2030   # HHMM of the last launchd slot (scripts/install-launchd.sh)
 retry_left() { [ "$(date +%H%M)" -lt "$last_slot" ]; }
+notified="$log_dir/.notified-midday-roll"
+notify_once() {
+    [ "$(cat "$notified" 2>/dev/null)" = "$today" ] && return
+    echo "$today" > "$notified"
+    notify "$1"
+}
 [ "${1:-}" = "--force" ] && FORCE=1
 # The Mac may run this during a brief "dark wake" from sleep, or before Wi-Fi
 # reconnects (2026-09-26: the 06:03 run timed out, then couldn't resolve the
 # DB host). Wait up to 3 minutes for DNS; with still no network, defer to the
-# next scheduled slot quietly — that isn't a failure worth a notification
+# next check quietly — that isn't a failure worth a notification
 # (verify-live emails if no live run lands for 36h).
 # Hard cap per Python step: a Mac that sleeps mid-run can leave a socket
 # hanging with no timeout (26-27 Sep: the Coles step hung for hours). perl's
@@ -71,20 +78,68 @@ for h in ("www.woolworths.com.au", "hotprices.org"):
 today=$(TZ=Australia/Sydney date +%F)
 already_ok() { [ "${FORCE:-}" != "1" ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$today" ]; }
 
+# Nothing to do before the first slot: the dump refreshes ~11am.
+too_early() { [ "${FORCE:-}" != "1" ] && [ "$(date +%H%M)" -lt 1230 ]; }
+
+# A failure while the Mac was awake is a real one (a source down, say), so it
+# retries at most hourly rather than at every 15-minute check.
+cooldown="$log_dir/.failed-midday-roll"
+cooling_down() {
+    [ "${FORCE:-}" != "1" ] || return 1
+    local t
+    t=$(cat "$cooldown" 2>/dev/null) && [ -n "$t" ] && [ $(( $(date +%s) - t )) -lt 3600 ]
+}
+
+# A sleeping Mac on battery can't be kept awake: caffeinate's PreventSystemSleep
+# only holds on AC power, and a sleeping Mac gets ~2-second "dark wakes" every
+# ~15 minutes, which is all a run then gets; each step's database or Woolworths
+# connection dies in between (2026-11-11: of 9 runs since 5 Nov only the one on
+# the charger finished, and one hung asleep for 38 hours, blocking a day of
+# slots). So the roll starts, and each step begins, only when the Mac can finish
+# it: on AC power, or on battery while it's properly awake (screen on, lid open).
+on_ac()      { /usr/bin/pmset -g batt | head -1 | grep -q "AC Power"; }
+full_wake()  { /usr/bin/pmset -g systemstate | grep -q "Graphics"; }
+lid_closed() { /usr/sbin/ioreg -r -k AppleClamshellState -d 4 | grep -q '"AppleClamshellState" = Yes'; }
+mac_awake()  { on_ac || { full_wake && ! lid_closed; }; }
+deferred_stamp="$log_dir/.deferred-midday-roll"
+
 cd "$repo" || exit 1
-if already_ok; then
-    echo "[$(date -Iseconds)] already succeeded today ($today) — skipping this slot" >> "$log"
+# The 15-minute check makes these routine, so they exit without a log file.
+if already_ok || too_early || cooling_down; then
+    exit 0
+fi
+if ! mac_awake; then
+    if [ "$(cat "$deferred_stamp" 2>/dev/null)" != "$today" ]; then
+        echo "$today" > "$deferred_stamp"
+        echo "[$(date -Iseconds)] Mac asleep on battery — deferring until it's awake (checked every 15 minutes)" >> "$log"
+    fi
     exit 0
 fi
 if ! wait_for_network; then
-    echo "[$(date -Iseconds)] no network after 3 min (asleep / offline) — deferring to the next slot" >> "$log"
+    echo "[$(date -Iseconds)] no network after 3 min (asleep / offline) — deferring to the next check" >> "$log"
     exit 0
 fi
 echo "[$(date -Iseconds)] starting midday atomic roll" >> "$log"
 
 final=0
+deferred=0
+started=$(date +%s)
+RUN_DEADLINE=3600   # wall clock; perl's alarm doesn't count time asleep
+# Once the Mac is asleep on battery (or the run has overrun an hour), the
+# remaining steps are skipped and a later check reruns the roll (every step is
+# safe to re-run). Exit 75 (temporary failure) marks the deferral.
+can_continue() {
+    [ "$deferred" -eq 0 ] || return 1
+    if ! mac_awake || [ $(( $(date +%s) - started )) -gt "$RUN_DEADLINE" ]; then
+        deferred=1
+        [ "$final" -eq 0 ] && final=75
+        echo "[$(date -Iseconds)] Mac asleep on battery or run overran — skipping the remaining steps" >> "$log"
+        return 1
+    fi
+}
 run_step() {
     local name="$1"; shift
+    can_continue || { echo "[$(date -Iseconds)] step=$name skipped" >> "$log"; return; }
     echo "[$(date -Iseconds)] step=$name starting" >> "$log"
     /usr/bin/caffeinate -i -s /usr/bin/perl -e 'alarm shift; exec @ARGV' "$STEP_TIMEOUT" "$py" -X utf8 "$@" >> "$log" 2>&1
     local code=$?
@@ -132,6 +187,7 @@ fi
 # can't hold back the Coles/Woolworths roll, the alert or a retry slot.
 soft_step() {
     local name="$1"; shift
+    can_continue || { echo "[$(date -Iseconds)] step=$name skipped (soft)" >> "$log"; return; }
     echo "[$(date -Iseconds)] step=$name starting (soft)" >> "$log"
     /usr/bin/caffeinate -i -s /usr/bin/perl -e 'alarm shift; exec @ARGV' "$STEP_TIMEOUT" "$py" -X utf8 "$@" >> "$log" 2>&1
     local code=$?
@@ -141,12 +197,20 @@ soft_step cw       -m src.refresh_cw --write-db --verbose
 soft_step cw_usual -m src.cw_usual_prices --write-db --limit 200 --verbose
 
 echo "[$(date -Iseconds)] finished exit=$final" >> "$log"
-[ "$final" -eq 0 ] && echo "$today" > "$stamp"
-if [ "$final" -ne 0 ] && retry_left; then
-    echo "[$(date -Iseconds)] failed; the next slot today retries (no notification)" >> "$log"
+if [ "$final" -eq 0 ]; then
+    echo "$today" > "$stamp"
+    rm -f "$cooldown"
+fi
+if [ "$deferred" -eq 1 ]; then
+    echo "[$(date -Iseconds)] deferred; a check reruns it once the Mac is awake (no notification)" >> "$log"
 elif [ "$final" -ne 0 ]; then
-    notify "Midday roll failed at its last retry today (exit $final). The cloud job covers it; usually the Mac slept mid-run. Log: $log"
+    date +%s > "$cooldown"
+    if retry_left; then
+        echo "[$(date -Iseconds)] failed while awake; retrying within the hour (no notification)" >> "$log"
+    else
+        notify_once "Midday roll failed while the Mac was awake (exit $final). The cloud job covers it. Log: $log"
+    fi
 elif grep -q "live_api_unavailable" "$log"; then
-    notify "Midday roll: live Woolworths API unreachable, served the dump fallback."
+    notify_once "Midday roll: live Woolworths API unreachable, served the backup list."
 fi
 exit $final
