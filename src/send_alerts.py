@@ -19,6 +19,8 @@ Step order per run:
   2. orphan GC         — delete devices not synced in 60 days (PRD section 7.4)
   3. week gate         — only send when specials' max(week_start) IS the
                          current Wednesday (never alert on a stale week)
+     live hold         — on the week's first day, wait until 5pm for the live
+                         Woolworths list (see hold_for_live_woolies)
   4. digest query      — eligible devices x this week's half-price watched items
   5. build + send      — canonical copy, batches of <=100
   6. dedup log write   — device_alerts_log, on conflict do nothing
@@ -39,13 +41,13 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time
 
 import psycopg
 import requests
 
 from src.env import load_dotenv
-from src.weeks import current_promo_week, promo_week_start, sydney_today
+from src.weeks import current_promo_week, promo_week_start, sydney_now, sydney_today
 
 EXPO_SEND_URL = "https://exp.host/--/api/v2/push/send"
 EXPO_RECEIPTS_URL = "https://exp.host/--/api/v2/push/getReceipts"
@@ -129,6 +131,7 @@ class AlertStats:
     sent: int = 0
     errored: int = 0
     skipped_stale_week: bool = False
+    held_for_live: bool = False
 
 
 def _chunks(seq, n):
@@ -210,6 +213,41 @@ def _gc_orphans(conn: psycopg.Connection, log: logging.Logger, stats: AlertStats
     conn.commit()
     if stats.gc_deleted:
         log.info("alerts.gc deleted=%d (not synced in %d days)", stats.gc_deleted, _GC_DAYS)
+
+
+# Only the Mac can fetch the live Woolworths list (Woolworths blocks cloud
+# servers); the cloud's backup from the hotprices dump was 90% right in the week
+# of 2026-11-11 (1,270 of 1,407 items, 152 missed). The cloud's 12:45 run rolls
+# the week but holds the alert; the Mac's run sends it once the live list lands,
+# and the cloud's 5pm Wednesday run (migration 0041) sends it regardless.
+ALERT_HOLD_UNTIL = time(17, 0)
+_LIVE_WOOLIES_MIN = 400   # verify_data's woolies_current_week_live floor
+
+
+def hold_for_live_woolies(now_local: datetime, week: date, live_ready: bool,
+                          force: bool = False) -> bool:
+    """True while the week's alert should wait for the live Woolworths list:
+    on the week's first day, before ALERT_HOLD_UNTIL. A late week never waits."""
+    if force or live_ready:
+        return False
+    return now_local.date() == week and now_local.time() < ALERT_HOLD_UNTIL
+
+
+def woolies_live_ready(conn: psycopg.Connection, week: date) -> bool:
+    """The week's Woolworths list is the live one: a complete live scrape writes
+    its set and sweeps the backup's rows (a partial one leaves them)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select count(*) filter (where s.source = 'woolies_catalogue' and s.is_half_price),
+                   count(*) filter (where s.source = 'hotprices')
+              from specials s join products p on p.id = s.product_id
+             where s.week_start = %s and p.retailer = 'woolworths'
+            """,
+            (week,),
+        )
+        live, backup = cur.fetchone()
+    return live >= _LIVE_WOOLIES_MIN and backup == 0
 
 
 def cw_in_digest(today: date, force: bool = False) -> bool:
@@ -386,6 +424,12 @@ def run_alerts(
             log.error("alerts.skip no_week — specials table has no weeks; nothing to digest")
             return stats
         week = actual
+
+        if hold_for_live_woolies(sydney_now(), week, woolies_live_ready(conn, week), force):
+            stats.held_for_live = True
+            log.info("alerts.held week=%s — waiting for the live Woolworths list until %s",
+                     week, ALERT_HOLD_UNTIL.strftime("%H:%M"))
+            return stats
 
         digests = _eligible_digests(conn, week, only_device,
                                     with_cw=cw_in_digest(sydney_today(), force))
