@@ -178,7 +178,7 @@ merely that the scripts didn't crash. Several early incidents ran green
 in CI while a retailer's week was silently empty — that class of failure
 is now engineered away:
 
-- `src/verify_data.py` asserts 34 invariants against the live database at
+- `src/verify_data.py` asserts 35 invariants against the live database at
   the end of every workflow — per-retailer current-week floors, week
   freshness, no marketplace or legacy rows, catalogue floors, both
   retailers scraped within 26h, predictions/accuracy/aliases fresh,
@@ -198,7 +198,7 @@ is now engineered away:
 
 | Workflow | Cron (UTC) | Steps |
 |---|---|---|
-| `daily-ingestion.yml` | 02:00 daily | Coles refresh (dump) -> Woolies refresh (API, dump fallback) -> image fill -> push digests (`send_alerts`, once per device per week via DB dedup) -> Chemist Warehouse catalogue (`refresh_cw`, soft) -> **verify_data** |
+| `daily-ingestion.yml` | 02:17 daily, plus a Supabase pg_cron dispatch at 12:45 Sydney daily and 5pm Wednesdays | Coles refresh (dump) -> Woolies refresh (API, dump fallback) -> image fill -> push digests (`send_alerts`, once per device per week via DB dedup; on the week's first day it waits until 5pm for the live Woolies list) -> Chemist Warehouse catalogue (`refresh_cw`, soft) -> **verify_data** |
 | `verify-live.yml` | 05:07 daily (15:07 AEST) | **verify_data** only: fails the same day if the live Woolworths set is missing after the Wednesday 15:00 deadline or no live run landed in 36h |
 | `weekly-catalogue.yml` | 03:00 Sunday | full catalogue load -> predictor -> backtest (track record) -> cross-store matcher -> **verify_data** |
 
@@ -282,9 +282,12 @@ IPs, so two jobs also run from a home machine (macOS launchd):
 `scripts/refresh-woolies.sh` (06:00, live Woolies refresh) and
 `scripts/refresh-midday.sh` (12:30, atomic week roll: Coles, live Woolies,
 SaleFinder corrections, dinners, the alert, then Chemist Warehouse as soft
-steps that never change the exit code). `scripts/install-launchd.sh` registers
-both (`--uninstall` removes them); logs go to `~/Library/Logs/Wednesday/`.
-The cloud cron remains the backstop when that machine is off.
+steps that never change the exit code). A sleeping Mac on battery can't be
+kept awake, so both scripts skip while it's asleep on battery, and the midday
+roll is rechecked every 15 minutes to catch up within minutes of the Mac
+waking. `scripts/install-launchd.sh` registers both (`--uninstall` removes
+them); logs go to `~/Library/Logs/Wednesday/`. The cloud runs the roll at
+12:45 with the backup Woolies list when the Mac doesn't.
 
 Conventions: every CLI exits 0 on success and non-zero on failure (so CI
 steps fail loudly); destructive scripts dry-run by default; all writes
